@@ -49,7 +49,7 @@ def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
         raise ValueError(f"unknown split {split!r}; expected one of {list(SPLITS)}")
     root = Path(root)
     img_dir, csv_name = SPLITS[split]
-    df = pd.read_csv(root / csv_name)
+    df = pd.read_csv(root / csv_name, dtype={"id": str})  # keep hex ids as strings
 
     df["path"] = df["id"].map(lambda i: root / img_dir / f"{i}.jpeg")
     if split == "public_test":
