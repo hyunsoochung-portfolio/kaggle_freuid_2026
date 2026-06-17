@@ -64,7 +64,11 @@ def audet(scores: ArrayLike, labels: ArrayLike) -> float:
     """Area under the DET curve (APCER vs BPCER). Lower is better."""
     _, apcer, bpcer = _sweep(scores, labels)
     order = np.argsort(bpcer)
-    trapezoid = getattr(np, "trapezoid", np.trapz)  # np.trapz deprecated in numpy>=2
+    # numpy>=2 renamed trapz -> trapezoid (and dropped trapz); don't eagerly
+    # reference np.trapz as a default or it raises on numpy 2.x.
+    trapezoid = getattr(np, "trapezoid", None)
+    if trapezoid is None:
+        trapezoid = np.trapz
     return float(trapezoid(apcer[order], bpcer[order]))
 
 
