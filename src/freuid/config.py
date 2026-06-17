@@ -29,6 +29,7 @@ class Config:
     lr: float = 3e-4
     weight_decay: float = 1e-4
     num_workers: int = 8
+    limit: int | None = None  # cap train/val sizes for quick dev runs; None = full data
 
     extra: dict[str, Any] = field(default_factory=dict)
 

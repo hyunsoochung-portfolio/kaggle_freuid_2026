@@ -13,16 +13,18 @@ Two error rates are swept over the threshold:
     APCER(t) = P(score <  t | attack)     attack wrongly accepted as genuine
     BPCER(t) = P(score >= t | bona-fide)  genuine wrongly rejected as fraud
 
-NOTE: AuDET here is the plain area under the DET curve (APCER integrated over
-BPCER on a linear axis). If the official Kaggle scorer uses a normal-deviate
-(probit) axis, swap in that transform — keep this as the local proxy until the
-official scorer is published with the full dataset (June 2026).
+NOTE: the DET curve is APCER (=FNR for the fraud class) vs BPCER (=FPR). The area
+under it on a *linear* axis equals ``1 - ROC AUC`` (a perfect ranker → 0), which is
+what audet() returns. If the official Kaggle scorer integrates on a normal-deviate
+(probit) axis instead, swap in that transform — keep this as the local proxy until
+the official scorer ships with the full dataset (June 2026).
 """
 
 from __future__ import annotations
 
 import numpy as np
 from numpy.typing import ArrayLike
+from sklearn.metrics import roc_auc_score
 
 
 def _sweep(scores: ArrayLike, labels: ArrayLike) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -61,11 +63,15 @@ def apcer_at_bpcer(scores: ArrayLike, labels: ArrayLike, bpcer_target: float = 0
 
 
 def audet(scores: ArrayLike, labels: ArrayLike) -> float:
-    """Area under the DET curve (APCER vs BPCER). Lower is better."""
-    _, apcer, bpcer = _sweep(scores, labels)
-    order = np.argsort(bpcer)
-    trapezoid = getattr(np, "trapezoid", np.trapz)  # np.trapz deprecated in numpy>=2
-    return float(trapezoid(apcer[order], bpcer[order]))
+    """Area under the DET curve (APCER=FNR vs BPCER=FPR), linear axis.
+
+    Equals ``1 - ROC AUC``: a perfect ranker scores 0, random ~0.5. Lower is better.
+    """
+    scores = np.asarray(scores, dtype=float)
+    labels = np.asarray(labels, dtype=int)
+    if not np.isin(labels, (0, 1)).all():
+        raise ValueError("labels must be 0 (bona-fide) or 1 (fraud)")
+    return float(1.0 - roc_auc_score(labels, scores))
 
 
 def evaluate(scores: ArrayLike, labels: ArrayLike) -> dict[str, float]:
