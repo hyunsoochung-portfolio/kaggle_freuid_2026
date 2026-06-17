@@ -26,11 +26,13 @@ from freuid.utils import pick_device, seed_everything
 def run_epoch(model, loader, device, criterion, optimizer=None):
     """One pass. With an optimizer it trains; without, it evaluates.
 
-    Returns (mean_loss, scores, labels) where scores = P(fraud).
+    Returns (mean_loss, scores, labels) where scores = P(fraud). In train mode the
+    scores/labels are not collected (they would force a GPU->CPU sync every batch and
+    are unused), so both are returned as None.
     """
     is_train = optimizer is not None
     model.train(is_train)
-    total_loss, all_scores, all_labels = 0.0, [], []
+    total_loss, n_seen, all_scores, all_labels = 0.0, 0, [], []
     for imgs, labels in tqdm(loader, leave=False):
         imgs = imgs.to(device)
         targets = labels.float().unsqueeze(1).to(device)
@@ -41,21 +43,30 @@ def run_epoch(model, loader, device, criterion, optimizer=None):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-        total_loss += loss.item() * imgs.size(0)
-        all_scores.append(torch.sigmoid(logits).detach().squeeze(1).float().cpu())
-        all_labels.append(labels)
-    scores = torch.cat(all_scores).numpy()
-    labels = torch.cat(all_labels).numpy()
-    return total_loss / len(loader.dataset), scores, labels
+        bs = imgs.size(0)
+        total_loss += loss.item() * bs
+        n_seen += bs
+        if not is_train:
+            all_scores.append(torch.sigmoid(logits).squeeze(1).float().cpu())
+            all_labels.append(labels)
+    mean_loss = total_loss / max(n_seen, 1)
+    if is_train:
+        return mean_loss, None, None
+    return mean_loss, torch.cat(all_scores).numpy(), torch.cat(all_labels).numpy()
 
 
 def build_loaders(cfg: Config) -> tuple[DataLoader, DataLoader]:
     train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+    if cfg.limit:
+        # deterministic subset (sorted by id) for fast dev/smoke runs
+        train_ids = set(sorted(train_ids)[: cfg.limit])
+        val_ids = set(sorted(val_ids)[: max(1, cfg.limit // 5)])
     train_ds = FreuidDataset(cfg.data_dir, "train", build_transforms(cfg.image_size, True), ids=train_ids)
     val_ds = FreuidDataset(cfg.data_dir, "train", build_transforms(cfg.image_size, False), ids=val_ids)
+    pin_memory = torch.cuda.is_available()  # unsupported/no-op on MPS, only helps CUDA
     train_loader = DataLoader(
         train_ds, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=cfg.num_workers, pin_memory=True, drop_last=True,
+        num_workers=cfg.num_workers, pin_memory=pin_memory, drop_last=True,
     )
     val_loader = DataLoader(
         val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers,
