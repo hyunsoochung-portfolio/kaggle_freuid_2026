@@ -1,8 +1,15 @@
-"""Dataset + dataloaders.
+"""Dataset + dataloaders, wired to the real FREUID layout.
 
-STUB: the full dataset and its exact file/label layout land in June 2026. Fill in
-``_index_samples`` once the sample data is on disk (``bash scripts/download_data.sh``).
-Keep label convention consistent with metrics: 1 = fraud, 0 = bona-fide.
+The Kaggle archive double-nests each split's images and the label CSV's
+``image_path`` column is off by that extra level, so we build paths from the id
+instead of trusting ``image_path``:
+
+    data/train/train/<id>.jpeg          labels: train_labels.csv
+    data/train_sample/train_sample/...  labels: train_sample_labels.csv
+    data/public_test/public_test/...    ids:    sample_submission.csv (label is a placeholder)
+
+Label convention matches metrics.py: 1 = fraud, 0 = bona-fide, -1 = unknown (test).
+``train_labels.csv`` columns: id, image_path, label, is_digital, type ("COUNTRY/DOCTYPE").
 """
 
 from __future__ import annotations
@@ -10,35 +17,77 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset
+
+# split -> (image subdir relative to data root, labels/ids csv)
+SPLITS: dict[str, tuple[str, str]] = {
+    "train": ("train/train", "train_labels.csv"),
+    "train_sample": ("train_sample/train_sample", "train_sample_labels.csv"),
+    "public_test": ("public_test/public_test", "sample_submission.csv"),
+}
 
 
 @dataclass
 class Sample:
+    id: str
     path: Path
-    label: int  # 1 = fraud, 0 = bona-fide; -1 = unknown (test)
+    label: int  # 1 = fraud, 0 = bona-fide, -1 = unknown (test)
+    is_digital: bool | None = None
+    type: str | None = None  # "COUNTRY/DOCTYPE", e.g. "EGYPT/DL"
+
+
+def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
+    """Labels dataframe for a split, with a resolved absolute ``path`` column.
+
+    Paths are rebuilt from the id to dodge the double-nesting mismatch. For
+    ``public_test`` the csv is the sample submission (no real labels) → label = -1.
+    """
+    if split not in SPLITS:
+        raise ValueError(f"unknown split {split!r}; expected one of {list(SPLITS)}")
+    root = Path(root)
+    img_dir, csv_name = SPLITS[split]
+    df = pd.read_csv(root / csv_name)
+
+    df["path"] = df["id"].map(lambda i: root / img_dir / f"{i}.jpeg")
+    if split == "public_test":
+        df["label"] = -1
+        for col in ("is_digital", "type"):
+            df[col] = df.get(col)
+    return df
 
 
 class FreuidDataset(Dataset):
-    """Image dataset yielding (tensor, label). Transforms passed in from the trainer."""
+    """Image dataset yielding (transformed_image, label).
 
-    def __init__(self, root: str | Path, split: str = "train", transform=None) -> None:
+    Optionally restrict to a subset of ids (for train/val splits) via ``ids``.
+    """
+
+    def __init__(
+        self,
+        root: str | Path,
+        split: str = "train",
+        transform=None,
+        ids: set[str] | None = None,
+    ) -> None:
         self.root = Path(root)
         self.split = split
         self.transform = transform
-        self.samples: list[Sample] = self._index_samples()
-
-    def _index_samples(self) -> list[Sample]:
-        # TODO(team): implement once sample data layout is known (June 2026 release).
-        # Expected shape, adjust to the real structure:
-        #   data/train/bonafide/*.png   -> label 0
-        #   data/train/fraud/*.png      -> label 1
-        #   data/test/*.png             -> label -1
-        raise NotImplementedError(
-            "Dataset layout not wired up yet — inspect ./data after download_data.sh "
-            "and implement _index_samples()."
-        )
+        df = load_labels(self.root, split)
+        if ids is not None:
+            df = df[df["id"].isin(ids)]
+        self.samples: list[Sample] = [
+            Sample(
+                id=r.id,
+                path=Path(r.path),
+                label=int(r.label),
+                is_digital=bool(r.is_digital) if pd.notna(r.is_digital) else None,
+                type=r.type if pd.notna(r.type) else None,
+            )
+            for r in df.itertuples(index=False)
+        ]
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -49,3 +98,25 @@ class FreuidDataset(Dataset):
         if self.transform is not None:
             img = self.transform(img)
         return img, s.label
+
+
+def stratified_split(
+    root: str | Path,
+    val_fraction: float = 0.1,
+    seed: int = 42,
+    stratify_on: tuple[str, ...] = ("label", "type"),
+) -> tuple[set[str], set[str]]:
+    """Split train ids into (train_ids, val_ids), stratified by label×type.
+
+    Stratifying on type as well as label keeps every document domain represented in
+    validation, which matters because the test set probes cross-domain generalization.
+    """
+    df = load_labels(root, "train")
+    rng = np.random.default_rng(seed)
+    val_ids: set[str] = set()
+    for _, group in df.groupby(list(stratify_on)):
+        ids = group["id"].to_numpy()
+        n_val = min(len(ids), max(1, round(len(ids) * val_fraction)))
+        val_ids.update(rng.choice(ids, size=n_val, replace=False).tolist())
+    all_ids = set(df["id"])
+    return all_ids - val_ids, val_ids
