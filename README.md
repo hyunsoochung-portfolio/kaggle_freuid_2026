@@ -149,6 +149,9 @@ submissions/        # generated submission csvs — GITIGNORED
 - Gate every idea on the **local AuDET / APCER@1%BPCER** before burning a Kaggle submission.
 - Merge Kaggle teams **before the team-merge deadline** (submission quota becomes shared).
 
+**→ Full end-to-end guide** (train → infer → submit, what goes in each directory, how to add
+experiments/models, reproducibility checklist): [docs/workflow.md](docs/workflow.md).
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE). Required by the competition; also gives a patent grant.
