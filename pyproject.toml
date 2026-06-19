@@ -16,7 +16,7 @@ dependencies = [
     "pyyaml>=6.0",
     "tqdm>=4.66",
     "albumentations>=1.4",
-    "kaggle>=1.6",
+    "kaggle>=2.2",
 ]
 
 [project.optional-dependencies]
