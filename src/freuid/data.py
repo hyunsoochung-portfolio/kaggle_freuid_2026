@@ -57,6 +57,8 @@ def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
         for col in ("is_digital", "type"):
             df[col] = df.get(col)
     return df
+#[id, image_path, label, path, is_digital, type] tables are used in 
+#train/val/test splits, and the path column is used to load images. 
 
 
 class FreuidDataset(Dataset):
@@ -98,6 +100,17 @@ class FreuidDataset(Dataset):
         if self.transform is not None:
             img = self.transform(img)
         return img, s.label
+
+    # __getitem__ / __len__ 은 파이썬의 "정해진 이름"(특수 메서드)이라, 이것만 구현하면
+    # 이 객체는 dataset[i] 와 len(dataset) 으로 다룰 수 있다:
+    #   - dataset[i]   → 파이썬이 자동으로 __getitem__(i) 호출
+    #   - len(dataset) → 자동으로 __len__() 호출
+    # DataLoader는 바로 이 약속(dataset[i], len(dataset))에 기대어 동작한다:
+    #   for batch in loader:        # DataLoader가
+    #       i = sampler가 고른 인덱스  #   순서를 정하고(shuffle이면 섞음)
+    #       sample = dataset[i]     #   우리 __getitem__(i) 를 자동 호출해 한 장씩 받아
+    #       ...                     #   batch_size개 모아 텐서로 쌓아(collate) 배치로 넘김
+    # 즉 우리가 만든 클래스라도 "정해진 메서드 이름"만 채우면 DataLoader가 알아서 호출한다.
 
 
 def stratified_split(
