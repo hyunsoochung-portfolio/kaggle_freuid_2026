@@ -223,7 +223,9 @@ data/*
 !data/.gitkeep
 submissions/*
 !submissions/.gitkeep
-checkpoints/
+# checkpoints/ is a symlink to Google Drive on some machines (see notebooks/run_baseline.ipynb).
+# No trailing slash so the rule matches both a real dir and that symlink.
+checkpoints
 *.pt
 *.pth
 *.ckpt
@@ -232,3 +234,7 @@ wandb/
 kaggle.json
 .env
 .env.*
+
+# smoke-test mini dataset (not for VCS)
+data_smoke/
+data_smoke_*.zip
