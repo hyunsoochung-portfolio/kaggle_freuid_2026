@@ -16,10 +16,16 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, stratified_split
+from freuid.data import FreuidDataset, OverlayDataset, stratified_split
 from freuid.metrics import evaluate
 from freuid.models import build_model
-from freuid.transforms import build_transforms, resolve_data_config
+from freuid.models.overlay import build_overlay_model
+from freuid.transforms import (
+    build_transforms,
+    get_overlay_train_transforms,
+    get_overlay_val_transforms,
+    resolve_data_config,
+)
 from freuid.utils import pick_device, seed_everything
 
 
@@ -63,6 +69,8 @@ def run_epoch(model, loader, device, criterion, optimizer=None):
 
 
 def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
+    if cfg.extra.get("model_type") == "overlay":
+        return build_overlay_loaders(cfg)
     train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
     if cfg.limit:
         # deterministic subset (sorted by id) for fast dev/smoke runs
@@ -100,6 +108,35 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
     return train_loader, val_loader
 
 
+def build_overlay_loaders(cfg: Config) -> tuple[DataLoader, DataLoader]:
+    train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+    if cfg.limit:
+        train_ids = set(sorted(train_ids)[: cfg.limit])
+        val_ids = set(sorted(val_ids)[: max(1, cfg.limit // 5)])
+    ov = cfg.extra.get("overlay", {})
+    crop_kw = dict(
+        crop_margin=ov.get("crop_margin", 0.75),
+        cache_dir=ov.get("crop_cache_dir", "data/processed/overlay_crops"),
+    )
+    train_ds = OverlayDataset(
+        cfg.data_dir, "train", get_overlay_train_transforms(cfg.image_size or 224),
+        ids=train_ids, **crop_kw,
+    )
+    val_ds = OverlayDataset(
+        cfg.data_dir, "train", get_overlay_val_transforms(cfg.image_size or 224),
+        ids=val_ids, **crop_kw,
+    )
+    pin_memory = torch.cuda.is_available()
+    train_loader = DataLoader(
+        train_ds, batch_size=cfg.batch_size, shuffle=True,
+        num_workers=0, pin_memory=pin_memory, drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0,
+    )
+    return train_loader, val_loader
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -108,18 +145,26 @@ def main() -> None:
     cfg = load_config(args.config)
     seed_everything(cfg.seed)
     device = pick_device()
-    # Pull normalization + input size from the backbone itself (cfg.image_size overrides
-    # the native resolution when set) so preprocessing always matches the pretrained model.
-    data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
-    print(
-        f"[train] config '{cfg.name}' | device={device} | backbone={cfg.backbone} | "
-        f"image_size={data_cfg['image_size']} mean={data_cfg['mean']}"
-    )
+    is_overlay = cfg.extra.get("model_type") == "overlay"
+
+    if is_overlay:
+        img_size = cfg.image_size or 224
+        print(f"[train] config '{cfg.name}' | device={device} | model=overlay | image_size={img_size}")
+        data_cfg: dict = {}
+    else:
+        data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
+        print(
+            f"[train] config '{cfg.name}' | device={device} | backbone={cfg.backbone} | "
+            f"image_size={data_cfg['image_size']} mean={data_cfg['mean']}"
+        )
 
     train_loader, val_loader = build_loaders(cfg, data_cfg)
     print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
 
-    model = build_model(cfg.backbone, cfg.pretrained).to(device)
+    if is_overlay:
+        model = build_overlay_model(cfg).to(device)
+    else:
+        model = build_model(cfg.backbone, cfg.pretrained).to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
