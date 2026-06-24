@@ -1,0 +1,21 @@
+# Smoke test: ~100 images, tiny + fast, just to verify the pipeline runs (e.g. on Colab GPU).
+# Pair with the data_smoke/ mini-set (data_smoke_100.zip). Not for real metrics.
+name: smoke
+seed: 42
+
+# data
+data_dir: data_smoke
+image_size: 224
+val_fraction: 0.1
+
+# model
+backbone: tf_efficientnetv2_s.in21k
+pretrained: true
+
+# train
+epochs: 2
+batch_size: 16
+lr: 0.0003
+weight_decay: 0.0001
+num_workers: 2
+limit: 100
