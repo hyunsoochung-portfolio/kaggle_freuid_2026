@@ -150,9 +150,11 @@ def stratified_split(
 _mtcnn_instance = None
 
 
-def _get_mtcnn(device="cpu"):
+def _get_mtcnn(device=None):
     global _mtcnn_instance
     if _mtcnn_instance is None:
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         from facenet_pytorch import MTCNN
         _mtcnn_instance = MTCNN(keep_all=False, device=device, post_process=False)
     return _mtcnn_instance
