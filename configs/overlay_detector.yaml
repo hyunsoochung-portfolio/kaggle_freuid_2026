@@ -3,7 +3,7 @@ name: overlay-detector
 seed: 42
 
 # --- Config dataclass fields (consumed by the shared pipeline) ---
-data_dir: data
+data_dir: data/raw
 image_size: 224 # overlay net is tuned for 224, not the 384 baseline default
 val_fraction: 0.1
 epochs: 3
@@ -27,4 +27,4 @@ model: # → cfg.extra["model"]  (read by build_overlay_model / the network)
 
 overlay: # → cfg.extra["overlay"]  (read by OverlayDataset / precache_crops)
   crop_margin: 0.75
-  crop_cache_dir: data/processed/overlay_crops
+  crop_cache_dir: data/raw/processed/overlay_crops
