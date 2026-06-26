@@ -186,7 +186,7 @@ def main() -> None:
                 {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
                 ckpt,
             )
-            print(f"  ↳ saved {ckpt} (AuDET={best_audet:.4f})")
+            print(f"  -> saved {ckpt} (AuDET={best_audet:.4f})")
 
 
 if __name__ == "__main__":
