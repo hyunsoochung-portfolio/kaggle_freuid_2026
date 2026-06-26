@@ -1,0 +1,20 @@
+# Colab variant of baseline: full data, but smaller image + bigger batch + fewer epochs so a
+# run finishes inside one free Colab session. Matches the run that produced baseline_colab.pt.
+name: baseline_colab
+seed: 42
+
+# data
+data_dir: data
+image_size: 224      # 384 -> 224: biggest speedup (lighter decode + compute)
+val_fraction: 0.1
+
+# model
+backbone: tf_efficientnetv2_s.in21k
+pretrained: true
+
+# train
+epochs: 2
+batch_size: 64       # 224px fits a larger batch on a T4 -> better GPU utilisation
+lr: 0.0003
+weight_decay: 0.0001
+num_workers: 4
