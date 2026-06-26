@@ -20,10 +20,12 @@ so every id gets a real score.
 from __future__ import annotations
 
 import argparse
+import random
 from dataclasses import fields
 from pathlib import Path
 
 import torch
+import torchvision.transforms.functional as TF
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -38,12 +40,27 @@ SCORE_COLUMN = "label"
 MISSING_DEFAULT = 0.0  # ids whose image is absent locally (filled for real on Kaggle)
 
 
+def _tta_aug(imgs: torch.Tensor) -> torch.Tensor:
+    """Single TTA step: small random rotation (no flips — documents have orientation)."""
+    angle = random.uniform(-5, 5)
+    return TF.rotate(imgs, angle)
+
+
 @torch.no_grad()
-def predict_scores(model, loader, device) -> list[float]:
-    """Fraud scores in dataset order (loader must be shuffle=False)."""
+def predict_scores(model, loader, device, tta_steps: int = 0) -> list[float]:
+    """Fraud scores in dataset order (loader must be shuffle=False).
+
+    tta_steps=0 → standard single-pass inference.
+    tta_steps=N → average scores over original + N-1 augmented passes.
+    """
     scores: list[float] = []
     for imgs, _ in tqdm(loader, leave=False):
-        logits = model(imgs.to(device))
+        imgs = imgs.to(device)
+        logits = model(imgs)
+        if tta_steps > 1:
+            for _ in range(tta_steps - 1):
+                logits = logits + model(_tta_aug(imgs))
+            logits = logits / tta_steps
         scores.extend(torch.sigmoid(logits).squeeze(1).cpu().tolist())
     return scores
 
@@ -95,6 +112,8 @@ def main() -> None:
     )
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--tta", type=int, default=0, metavar="N",
+                        help="test-time augmentation steps (0=off, 5 is a good default)")
     args = parser.parse_args()
     # state = torch.load(args.checkpoint, map_location="cpu")
     # checkpoint 불러오기. state는 checkpoint의 내용이 담긴 딕셔너리.
@@ -123,7 +142,9 @@ def main() -> None:
     transform = build_transforms(data_cfg["image_size"], False, data_cfg["mean"], data_cfg["std"])
     ds = FreuidDataset(cfg.data_dir, "public_test", transform, ids=present_ids)
     loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
-    scores = predict_scores(model, loader, device)
+    if args.tta > 0:
+        print(f"[infer] TTA enabled: {args.tta} passes")
+    scores = predict_scores(model, loader, device, tta_steps=args.tta)
     id_to_score = dict(zip((s.id for s in ds.samples), scores, strict=True))
 
     submission[SCORE_COLUMN] = submission[ID_COLUMN].map(

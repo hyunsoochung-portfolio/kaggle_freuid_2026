@@ -26,8 +26,15 @@ from __future__ import annotations
 import io
 import random
 
+import numpy as np
 from PIL import Image
 from torchvision import transforms
+
+try:
+    import albumentations as A
+    _ALBU_AVAILABLE = True
+except ImportError:
+    _ALBU_AVAILABLE = False
 
 # Fallback only — used when a backbone isn't registered in timm.
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -69,6 +76,25 @@ class RandomDownscaleUpscale:
         return small.resize((w, h), Image.BILINEAR)
 
 
+class GridDistortion:
+    """Albumentations GridDistortion wrapped for PIL → PIL use.
+
+    Simulates physical warping/bending of a document (print-and-capture, scanner
+    bed distortion). Falls back to a no-op if albumentations is unavailable.
+    """
+
+    def __init__(self, p: float = 0.3) -> None:
+        self.p = p
+        self._aug = A.GridDistortion(p=1.0) if _ALBU_AVAILABLE else None
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if self._aug is None or random.random() > self.p:
+            return img
+        arr = np.array(img)
+        result = self._aug(image=arr)["image"]
+        return Image.fromarray(result)
+
+
 def resolve_data_config(backbone: str, image_size: int | None = None) -> dict:
     """Mean/std/input-size the given backbone was pretrained with.
 
@@ -102,8 +128,13 @@ def build_transforms(
             transforms.RandomApply([transforms.GaussianBlur(3, sigma=(0.1, 1.5))], p=0.3),
             transforms.RandomApply([RandomDownscaleUpscale((0.5, 0.9))], p=0.3),
             transforms.RandomApply([RandomJPEGCompression((30, 90))], p=0.5),
+            GridDistortion(p=0.3),
         ]
     steps += [transforms.ToTensor(), transforms.Normalize(mean, std)]
+    if train:
+        # Randomly erase small patches — forces model to rely on distributed fraud
+        # cues rather than a single tell-tale region.
+        steps.append(transforms.RandomErasing(p=0.3, scale=(0.02, 0.15)))
     return transforms.Compose(steps)
 #   class Compose:
 #      def __init__(self, transforms):

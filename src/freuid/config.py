@@ -30,6 +30,9 @@ class Config:
     weight_decay: float = 1e-4
     num_workers: int = 8
     limit: int | None = None  # cap train/val sizes for quick dev runs; None = full data
+    label_smoothing: float = 0.0
+    val_strategy: str = "random"     # "random" | "cross_domain"
+    val_domain_fraction: float = 0.2 # fraction of doc types held out for cross_domain val
 
     extra: dict[str, Any] = field(default_factory=dict)
 

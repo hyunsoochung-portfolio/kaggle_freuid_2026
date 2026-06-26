@@ -113,6 +113,29 @@ class FreuidDataset(Dataset):
     # 즉 우리가 만든 클래스라도 "정해진 메서드 이름"만 채우면 DataLoader가 알아서 호출한다.
 
 
+def cross_domain_split(
+    root: str | Path,
+    val_domain_fraction: float = 0.2,
+    seed: int = 42,
+) -> tuple[set[str], set[str]]:
+    """Hold out entire document types for validation.
+
+    Forces the model to generalise across unseen document domains rather than
+    memorising per-type templates, giving a val score that better predicts the
+    Kaggle leaderboard (which probes cross-domain generalisation).
+    """
+    df = load_labels(root, "train")
+    types = df["type"].dropna().unique()
+    rng = np.random.default_rng(seed)
+    n_val = max(1, round(len(types) * val_domain_fraction))
+    val_types = set(rng.choice(types, size=n_val, replace=False).tolist())
+    val_ids = set(df[df["type"].isin(val_types)]["id"])
+    train_ids = set(df["id"]) - val_ids
+    print(f"[split] cross-domain: {len(val_types)} held-out types → "
+          f"train={len(train_ids)} val={len(val_ids)}")
+    return train_ids, val_ids
+
+
 def stratified_split(
     root: str | Path,
     val_fraction: float = 0.1,

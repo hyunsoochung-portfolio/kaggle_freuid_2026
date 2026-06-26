@@ -16,14 +16,14 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, stratified_split
+from freuid.data import FreuidDataset, cross_domain_split, stratified_split
 from freuid.metrics import evaluate
 from freuid.models import build_model
 from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
 
-def run_epoch(model, loader, device, criterion, optimizer=None):
+def run_epoch(model, loader, device, criterion, optimizer=None, label_smoothing=0.0):
     """One pass. With an optimizer it trains; without, it evaluates.
 
     Returns (mean_loss, scores, labels) where scores = P(fraud). In train mode the
@@ -36,6 +36,8 @@ def run_epoch(model, loader, device, criterion, optimizer=None):
     for imgs, labels in tqdm(loader, leave=False):
         imgs = imgs.to(device)
         targets = labels.float().unsqueeze(1).to(device)
+        if label_smoothing > 0 and optimizer is not None:
+            targets = targets * (1 - label_smoothing) + label_smoothing * 0.5
         # eval 모드에서는 불필요한 그래디언트 계산을 끄는 컨텍스트 매니저
         with torch.set_grad_enabled(is_train):
             # 모델 forward() 호출. imgs [B, 3, H, W] -> logits [B, 1] (B=batch_size)
@@ -63,7 +65,10 @@ def run_epoch(model, loader, device, criterion, optimizer=None):
 
 
 def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
-    train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+    if cfg.val_strategy == "cross_domain":
+        train_ids, val_ids = cross_domain_split(cfg.data_dir, cfg.val_domain_fraction, cfg.seed)
+    else:
+        train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
     if cfg.limit:
         # deterministic subset (sorted by id) for fast dev/smoke runs
         train_ids = set(sorted(train_ids)[: cfg.limit])
@@ -137,7 +142,7 @@ def main() -> None:
         print(f"[train] resuming from epoch {resume['epoch']} (best AuDET={best_audet:.4f})")
 
     for epoch in range(start_epoch, cfg.epochs + 1):
-        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer)
+        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer, cfg.label_smoothing)
         val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion)
         m = evaluate(val_scores, val_labels)
         print(
