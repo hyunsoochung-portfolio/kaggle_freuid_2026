@@ -125,7 +125,18 @@ def main() -> None:
 
     Path("checkpoints").mkdir(exist_ok=True)
     best_audet = float("inf")
-    for epoch in range(1, cfg.epochs + 1):
+    start_epoch = 1
+
+    resume_ckpt = Path("checkpoints") / f"{cfg.name}_resume.pt"
+    if resume_ckpt.exists():
+        resume = torch.load(resume_ckpt, map_location=device)
+        model.load_state_dict(resume["model"])
+        optimizer.load_state_dict(resume["optimizer"])
+        start_epoch = resume["epoch"] + 1
+        best_audet = resume["best_audet"]
+        print(f"[train] resuming from epoch {resume['epoch']} (best AuDET={best_audet:.4f})")
+
+    for epoch in range(start_epoch, cfg.epochs + 1):
         train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer)
         val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion)
         m = evaluate(val_scores, val_labels)
@@ -133,10 +144,14 @@ def main() -> None:
             f"epoch {epoch:>2}: train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
             f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}"
         )
+        torch.save(
+            {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+             "epoch": epoch, "best_audet": best_audet},
+            resume_ckpt,
+        )
         if m["audet"] < best_audet:
             best_audet = m["audet"]
             ckpt = Path("checkpoints") / f"{cfg.name}.pt"
-            # model 가중치 + config + epoch + metrics를 한 딕셔너리로 저장 (checkpoints/<name>.pt)
             torch.save(
                 {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
                 ckpt,
