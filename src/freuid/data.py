@@ -229,6 +229,8 @@ def precache_crops(cfg, splits: tuple[str, ...] = ("train",)) -> None:
     for split in splits:
         df = load_labels(cfg.data_dir, split)
         for row in df.itertuples(index=False):
+            if not os.path.exists(str(row.path)):  # hidden test images absent locally
+                continue
             n_total += 1
             cache_path = os.path.join(cache_dir, f"{row.id}.png")
             if not os.path.exists(cache_path):
