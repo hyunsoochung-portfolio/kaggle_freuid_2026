@@ -3,8 +3,8 @@ name: baseline
 seed: 42
 
 # data
-data_dir: data
-image_size: 384
+data_dir: data/raw
+image_size: 384      # set to null to use the backbone's native resolution
 val_fraction: 0.1
 
 # model

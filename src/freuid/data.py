@@ -17,10 +17,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import logging
+import os
+
+import cv2
 import numpy as np
 import pandas as pd
+import torch
 from PIL import Image
 from torch.utils.data import Dataset
+
+logger = logging.getLogger(__name__)
+
 
 # split -> (image subdir relative to data root, labels/ids csv)
 SPLITS: dict[str, tuple[str, str]] = {
@@ -57,6 +65,8 @@ def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
         for col in ("is_digital", "type"):
             df[col] = df.get(col)
     return df
+#[id, image_path, label, path, is_digital, type] tables are used in 
+#train/val/test splits, and the path column is used to load images. 
 
 
 class FreuidDataset(Dataset):
@@ -99,6 +109,17 @@ class FreuidDataset(Dataset):
             img = self.transform(img)
         return img, s.label
 
+    # __getitem__ / __len__ 은 파이썬의 "정해진 이름"(특수 메서드)이라, 이것만 구현하면
+    # 이 객체는 dataset[i] 와 len(dataset) 으로 다룰 수 있다:
+    #   - dataset[i]   → 파이썬이 자동으로 __getitem__(i) 호출
+    #   - len(dataset) → 자동으로 __len__() 호출
+    # DataLoader는 바로 이 약속(dataset[i], len(dataset))에 기대어 동작한다:
+    #   for batch in loader:        # DataLoader가
+    #       i = sampler가 고른 인덱스  #   순서를 정하고(shuffle이면 섞음)
+    #       sample = dataset[i]     #   우리 __getitem__(i) 를 자동 호출해 한 장씩 받아
+    #       ...                     #   batch_size개 모아 텐서로 쌓아(collate) 배치로 넘김
+    # 즉 우리가 만든 클래스라도 "정해진 메서드 이름"만 채우면 DataLoader가 알아서 호출한다.
+
 
 def stratified_split(
     root: str | Path,
@@ -120,3 +141,167 @@ def stratified_split(
         val_ids.update(rng.choice(ids, size=n_val, replace=False).tolist())
     all_ids = set(df["id"])
     return all_ids - val_ids, val_ids
+
+
+# ---------------------------------------------------------------------------
+# Overlay dataset — face-region crop with cache
+# ---------------------------------------------------------------------------
+
+_mtcnn_instance = None
+
+
+def _get_mtcnn(device=None, min_face_size: int = 60):
+    global _mtcnn_instance
+    if _mtcnn_instance is None:
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        from facenet_pytorch import MTCNN
+        _mtcnn_instance = MTCNN(
+            keep_all=False, device=device, post_process=False,
+            min_face_size=min_face_size,
+        )
+    return _mtcnn_instance
+
+
+def _crop_face(
+    image: np.ndarray,
+    mtcnn,
+    crop_margin: float,
+    detect_long_side: int = 1024,
+) -> np.ndarray:
+    h, w = image.shape[:2]
+    long_side = max(h, w)
+    if long_side > detect_long_side:
+        scale = detect_long_side / long_side
+        small = cv2.resize(
+            image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+        )
+    else:
+        scale = 1.0
+        small = image
+
+    boxes, _ = mtcnn.detect(Image.fromarray(small))
+
+    if boxes is not None and len(boxes) > 0:
+        # Detection ran on a downscaled copy; divide by scale to get original-resolution coords.
+        x1, y1, x2, y2 = boxes[0] / scale
+        bw, bh = x2 - x1, y2 - y1
+        mx = bw * crop_margin
+        my = bh * crop_margin
+        x1 = max(0, int(x1 - mx))
+        y1 = max(0, int(y1 - my))
+        x2 = min(w, int(x2 + mx))
+        y2 = min(h, int(y2 + my))
+        return image[y1:y2, x1:x2]  # crop from full-resolution original
+
+    side = int(min(h, w) * 0.6)
+    cy, cx = h // 2, w // 2
+    y1 = cy - side // 2
+    x1 = cx - side // 2
+    return image[y1:y1 + side, x1:x1 + side]
+
+
+def resolve_cache_dir(cfg) -> str:
+    """Single source of truth for the overlay crop cache directory."""
+    return cfg.extra.get("overlay", {}).get("crop_cache_dir", "data/raw/processed/overlay_crops")
+
+
+def precache_crops(cfg, splits: tuple[str, ...] = ("train",)) -> None:
+    """Pre-cache face crops for the given splits. Idempotent: skips already-cached ids.
+
+    Training only needs splits=("train",) — val ids are a subset of train files.
+    Inference calls this with splits=("public_test",) to populate test crops before scoring.
+    """
+    from tqdm import tqdm
+
+    overlay = cfg.extra.get("overlay", {})
+    cache_dir = resolve_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    crop_margin = overlay.get("crop_margin", 0.75)
+    detect_long_side = overlay.get("detect_long_side", 1024)
+    min_face_size = overlay.get("min_face_size", 60)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    mtcnn = _get_mtcnn(device, min_face_size)
+
+    all_paths: list[tuple[str, str, str]] = []
+    n_total = 0
+    for split in splits:
+        df = load_labels(cfg.data_dir, split)
+        for row in df.itertuples(index=False):
+            n_total += 1
+            cache_path = os.path.join(cache_dir, f"{row.id}.png")
+            if not os.path.exists(cache_path):
+                all_paths.append((str(row.path), row.id, cache_path))
+
+    n_skip = n_total - len(all_paths)
+    if not all_paths:
+        print(f"[precache] all {n_skip} crops already cached in {cache_dir}/")
+        return
+
+    print(
+        f"[precache] {n_skip} already cached, detecting {len(all_paths)} new "
+        f"(splits={splits}, device={device})..."
+    )
+    for img_path, image_id, cache_path in tqdm(all_paths, desc="crop"):
+        image = cv2.imread(img_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        crop = _crop_face(image, mtcnn, crop_margin, detect_long_side)
+        cv2.imwrite(cache_path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+
+    print(f"[precache] done. {len(all_paths)} new crops saved to {cache_dir}/")
+
+
+class OverlayDataset(Dataset):
+    """Face-crop dataset returning ``(image, label)`` for run_epoch / predict_scores."""
+
+    def __init__(
+        self,
+        root: str | Path,
+        split: str = "train",
+        transform=None,
+        ids: set[str] | None = None,
+        *,
+        crop_margin: float = 0.75,
+        cache_dir: str = "data/raw/processed/overlay_crops",
+        detect_long_side: int = 1024,
+        min_face_size: int = 60,
+    ) -> None:
+        self.transform = transform
+        self.crop_margin = crop_margin
+        self.cache_dir = cache_dir
+        self.detect_long_side = detect_long_side
+        os.makedirs(self.cache_dir, exist_ok=True)
+        _get_mtcnn(min_face_size=min_face_size)  # pre-init singleton with configured min_face_size
+
+        df = load_labels(root, split)
+        if ids is not None:
+            df = df[df["id"].isin(ids)]
+        self.samples: list[tuple[str, Path, int]] = [
+            (row.id, Path(row.path), int(row.label))
+            for row in df.itertuples(index=False)
+        ]
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def _get_crop(self, img_path: Path, image_id: str) -> np.ndarray:
+        cache_path = os.path.join(self.cache_dir, f"{image_id}.png")
+        if os.path.exists(cache_path):
+            img = cv2.imread(cache_path)
+            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        image = cv2.imread(str(img_path))
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        crop = _crop_face(image, _get_mtcnn(), self.crop_margin, self.detect_long_side)
+        cv2.imwrite(cache_path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+        return crop
+
+    def __getitem__(self, idx: int):
+        sid, path, label = self.samples[idx]
+        image = self._get_crop(path, sid)
+
+        if self.transform:
+            image = self.transform(image=image)["image"]
+
+        return image, label
