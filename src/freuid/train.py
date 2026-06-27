@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, OverlayDataset, stratified_split
+from freuid.data import FreuidDataset, OverlayDataset, stratified_split, resolve_cache_dir
 from freuid.metrics import evaluate
 from freuid.models import build_model
 from freuid.models.overlay import build_overlay_model
@@ -116,7 +116,9 @@ def build_overlay_loaders(cfg: Config) -> tuple[DataLoader, DataLoader]:
     ov = cfg.extra.get("overlay", {})
     crop_kw = dict(
         crop_margin=ov.get("crop_margin", 0.75),
-        cache_dir=ov.get("crop_cache_dir", "data/processed/overlay_crops"),
+        cache_dir=resolve_cache_dir(cfg),
+        detect_long_side=ov.get("detect_long_side", 1024),
+        min_face_size=ov.get("min_face_size", 60),
     )
     train_ds = OverlayDataset(
         cfg.data_dir, "train", get_overlay_train_transforms(cfg.image_size or 224),

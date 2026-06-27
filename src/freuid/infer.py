@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, OverlayDataset, load_labels
+from freuid.data import FreuidDataset, OverlayDataset, load_labels, precache_crops, resolve_cache_dir
 from freuid.models import build_model
 from freuid.models.overlay import build_overlay_model
 from freuid.transforms import build_transforms, get_overlay_val_transforms, resolve_data_config
@@ -126,13 +126,16 @@ def main() -> None:
     print(f"[infer] {len(submission)} ids total; {len(present_ids)} images present locally")
 
     if is_overlay:
+        precache_crops(cfg, splits=("public_test",))
         ov = cfg.extra.get("overlay", {})
         ds = OverlayDataset(
             cfg.data_dir, "public_test",
             get_overlay_val_transforms(cfg.image_size or 224),
             ids=present_ids,
             crop_margin=ov.get("crop_margin", 0.75),
-            cache_dir=ov.get("crop_cache_dir", "data/processed/overlay_crops"),
+            cache_dir=resolve_cache_dir(cfg),
+            detect_long_side=ov.get("detect_long_side", 1024),
+            min_face_size=ov.get("min_face_size", 60),
         )
         loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
         scores = predict_scores(model, loader, device)

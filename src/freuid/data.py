@@ -150,23 +150,41 @@ def stratified_split(
 _mtcnn_instance = None
 
 
-def _get_mtcnn(device=None):
+def _get_mtcnn(device=None, min_face_size: int = 60):
     global _mtcnn_instance
     if _mtcnn_instance is None:
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         from facenet_pytorch import MTCNN
-        _mtcnn_instance = MTCNN(keep_all=False, device=device, post_process=False)
+        _mtcnn_instance = MTCNN(
+            keep_all=False, device=device, post_process=False,
+            min_face_size=min_face_size,
+        )
     return _mtcnn_instance
 
 
-def _crop_face(image: np.ndarray, mtcnn, crop_margin: float) -> np.ndarray:
+def _crop_face(
+    image: np.ndarray,
+    mtcnn,
+    crop_margin: float,
+    detect_long_side: int = 1024,
+) -> np.ndarray:
     h, w = image.shape[:2]
-    pil_img = Image.fromarray(image)
-    boxes, _ = mtcnn.detect(pil_img)
+    long_side = max(h, w)
+    if long_side > detect_long_side:
+        scale = detect_long_side / long_side
+        small = cv2.resize(
+            image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+        )
+    else:
+        scale = 1.0
+        small = image
+
+    boxes, _ = mtcnn.detect(Image.fromarray(small))
 
     if boxes is not None and len(boxes) > 0:
-        x1, y1, x2, y2 = boxes[0]
+        # Detection ran on a downscaled copy; divide by scale to get original-resolution coords.
+        x1, y1, x2, y2 = boxes[0] / scale
         bw, bh = x2 - x1, y2 - y1
         mx = bw * crop_margin
         my = bh * crop_margin
@@ -174,7 +192,7 @@ def _crop_face(image: np.ndarray, mtcnn, crop_margin: float) -> np.ndarray:
         y1 = max(0, int(y1 - my))
         x2 = min(w, int(x2 + mx))
         y2 = min(h, int(y2 + my))
-        return image[y1:y2, x1:x2]
+        return image[y1:y2, x1:x2]  # crop from full-resolution original
 
     side = int(min(h, w) * 0.6)
     cy, cx = h // 2, w // 2
@@ -183,38 +201,55 @@ def _crop_face(image: np.ndarray, mtcnn, crop_margin: float) -> np.ndarray:
     return image[y1:y1 + side, x1:x1 + side]
 
 
-def precache_crops(cfg):
-    """Pre-cache face crops for all train + test images. Run once before training."""
+def resolve_cache_dir(cfg) -> str:
+    """Single source of truth for the overlay crop cache directory."""
+    return cfg.extra.get("overlay", {}).get("crop_cache_dir", "data/raw/processed/overlay_crops")
+
+
+def precache_crops(cfg, splits: tuple[str, ...] = ("train",)) -> None:
+    """Pre-cache face crops for the given splits. Idempotent: skips already-cached ids.
+
+    Training only needs splits=("train",) — val ids are a subset of train files.
+    Inference calls this with splits=("public_test",) to populate test crops before scoring.
+    """
     from tqdm import tqdm
 
     overlay = cfg.extra.get("overlay", {})
-    cache_dir = overlay.get("crop_cache_dir", "data/processed/overlay_crops")
+    cache_dir = resolve_cache_dir(cfg)
     os.makedirs(cache_dir, exist_ok=True)
     crop_margin = overlay.get("crop_margin", 0.75)
+    detect_long_side = overlay.get("detect_long_side", 1024)
+    min_face_size = overlay.get("min_face_size", 60)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    mtcnn = _get_mtcnn(device)
+    mtcnn = _get_mtcnn(device, min_face_size)
 
     all_paths: list[tuple[str, str, str]] = []
-    for split in ("train", "public_test"):
+    n_total = 0
+    for split in splits:
         df = load_labels(cfg.data_dir, split)
         for row in df.itertuples(index=False):
+            n_total += 1
             cache_path = os.path.join(cache_dir, f"{row.id}.png")
             if not os.path.exists(cache_path):
                 all_paths.append((str(row.path), row.id, cache_path))
 
+    n_skip = n_total - len(all_paths)
     if not all_paths:
-        print(f"all crops already cached in {cache_dir}/")
+        print(f"[precache] all {n_skip} crops already cached in {cache_dir}/")
         return
 
-    print(f"caching {len(all_paths)} face crops (device={device})...")
+    print(
+        f"[precache] {n_skip} already cached, detecting {len(all_paths)} new "
+        f"(splits={splits}, device={device})..."
+    )
     for img_path, image_id, cache_path in tqdm(all_paths, desc="crop"):
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        crop = _crop_face(image, mtcnn, crop_margin)
+        crop = _crop_face(image, mtcnn, crop_margin, detect_long_side)
         cv2.imwrite(cache_path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
 
-    print(f"done. {len(all_paths)} crops saved to {cache_dir}/")
+    print(f"[precache] done. {len(all_paths)} new crops saved to {cache_dir}/")
 
 
 class OverlayDataset(Dataset):
@@ -228,12 +263,16 @@ class OverlayDataset(Dataset):
         ids: set[str] | None = None,
         *,
         crop_margin: float = 0.75,
-        cache_dir: str = "data/processed/overlay_crops",
+        cache_dir: str = "data/raw/processed/overlay_crops",
+        detect_long_side: int = 1024,
+        min_face_size: int = 60,
     ) -> None:
         self.transform = transform
         self.crop_margin = crop_margin
         self.cache_dir = cache_dir
+        self.detect_long_side = detect_long_side
         os.makedirs(self.cache_dir, exist_ok=True)
+        _get_mtcnn(min_face_size=min_face_size)  # pre-init singleton with configured min_face_size
 
         df = load_labels(root, split)
         if ids is not None:
@@ -254,7 +293,7 @@ class OverlayDataset(Dataset):
 
         image = cv2.imread(str(img_path))
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        crop = _crop_face(image, _get_mtcnn(), self.crop_margin)
+        crop = _crop_face(image, _get_mtcnn(), self.crop_margin, self.detect_long_side)
         cv2.imwrite(cache_path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
         return crop
 

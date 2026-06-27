@@ -28,3 +28,5 @@ model: # → cfg.extra["model"]  (read by build_overlay_model / the network)
 overlay: # → cfg.extra["overlay"]  (read by OverlayDataset / precache_crops)
   crop_margin: 0.75
   crop_cache_dir: data/raw/processed/overlay_crops
+  # detect_long_side: 1024  # downscale long side to this before MTCNN detection; never upscales
+  # min_face_size: 60       # MTCNN min_face_size — higher prunes more pyramid levels (faster on large IDs)
