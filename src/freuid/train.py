@@ -16,7 +16,13 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, OverlayDataset, stratified_split, resolve_cache_dir
+from freuid.data import (
+    FreuidDataset,
+    OverlayDataset,
+    lodo_split,
+    resolve_cache_dir,
+    stratified_split,
+)
 from freuid.metrics import evaluate
 from freuid.models import build_model
 from freuid.models.overlay import build_overlay_model
@@ -68,10 +74,17 @@ def run_epoch(model, loader, device, criterion, optimizer=None):
     return mean_loss, torch.cat(all_scores).numpy(), torch.cat(all_labels).numpy()
 
 
+def _split_ids(cfg: Config) -> tuple[set[str], set[str]]:
+    """Train/val id split: Leave-One-Domain-Out if val_doc_type is set, else stratified."""
+    if cfg.val_doc_type:
+        return lodo_split(cfg.data_dir, cfg.val_doc_type)
+    return stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+
+
 def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
     if cfg.extra.get("model_type") == "overlay":
         return build_overlay_loaders(cfg)
-    train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+    train_ids, val_ids = _split_ids(cfg)
     if cfg.limit:
         # deterministic subset (sorted by id) for fast dev/smoke runs
         train_ids = set(sorted(train_ids)[: cfg.limit])
@@ -109,7 +122,7 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
 
 
 def build_overlay_loaders(cfg: Config) -> tuple[DataLoader, DataLoader]:
-    train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+    train_ids, val_ids = _split_ids(cfg)
     if cfg.limit:
         train_ids = set(sorted(train_ids)[: cfg.limit])
         val_ids = set(sorted(val_ids)[: max(1, cfg.limit // 5)])

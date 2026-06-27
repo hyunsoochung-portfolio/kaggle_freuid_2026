@@ -6,6 +6,7 @@ seed: 42
 data_dir: data/raw
 image_size: 224 # overlay net is tuned for 224, not the 384 baseline default
 val_fraction: 0.1
+val_doc_type: MAURITIUS/ID # LODO: hold out this whole doc type for val (cross-domain signal); comment out -> random stratified split
 epochs: 3
 batch_size: 64
 lr: 0.0001

@@ -143,6 +143,33 @@ def stratified_split(
     return all_ids - val_ids, val_ids
 
 
+def lodo_split(root: str | Path, val_doc_type: str) -> tuple[set[str], set[str]]:
+    """Leave-One-Domain-Out: hold out one whole document ``type`` for validation.
+
+    Mirrors ``freuid-challenge``'s ``get_train_val_split``: all ids whose ``type`` equals
+    ``val_doc_type`` become validation, everything else is train. Train and val therefore
+    share NO document domain, so val AuDET measures cross-domain transfer (a more honest
+    proxy for the unseen-domain private test than the in-domain stratified split).
+
+    Returns ``(train_ids, val_ids)`` — the same shape as ``stratified_split`` so the
+    loaders are otherwise unchanged.
+    """
+    df = load_labels(root, "train")
+    types = set(df["type"].dropna())
+    if val_doc_type not in types:
+        raise ValueError(
+            f"val_doc_type {val_doc_type!r} not found; available: {sorted(types)}"
+        )
+    val_mask = df["type"] == val_doc_type
+    val_labels = set(df.loc[val_mask, "label"])
+    if val_labels != {0, 1}:
+        raise ValueError(
+            f"held-out domain {val_doc_type!r} has labels {val_labels}; need both 0 and 1 "
+            "(AuDET / ROC-AUC is undefined on a single-class validation set)"
+        )
+    return set(df.loc[~val_mask, "id"]), set(df.loc[val_mask, "id"])
+
+
 # ---------------------------------------------------------------------------
 # Overlay dataset — face-region crop with cache
 # ---------------------------------------------------------------------------

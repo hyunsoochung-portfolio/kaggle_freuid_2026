@@ -101,7 +101,8 @@ uv run ruff check src tests
 - **No horizontal flip** in augmentation — documents have text and orientation, and flipping destroys document semantics.
 - **MTCNN is a singleton** (`_mtcnn_instance` in data.py) and is not fork-safe — `num_workers: 0` is required for the overlay model.
 - **AuDET proxy**: `metrics.py` uses `1 − ROC AUC` as a linear-axis proxy, not byte-identical to the official Kaggle DET scorer. Use it for relative ranking; reconcile with the official scorer before trusting absolute values.
-- **Stratified split** in `stratified_split()` stratifies on `(label, type)` to keep all 7 document domains represented in validation.
+- **Stratified split** in `stratified_split()` stratifies on `(label, type)` to keep all 7 document domains represented in validation. This is the default (in-domain) signal.
+- **Leave-One-Domain-Out (opt-in)**: set `val_doc_type:` in a config (e.g. `MAURITIUS/ID`) to hold out one whole document `type` for validation via `lodo_split()`. Train and val then share no domain, so val AuDET measures cross-domain transfer — a more honest proxy for the unseen-domain private test. Leave `val_doc_type` unset to fall back to the stratified split.
 
 ## Adding experiments
 

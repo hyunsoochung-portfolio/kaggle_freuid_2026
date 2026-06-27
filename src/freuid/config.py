@@ -18,6 +18,9 @@ class Config:
     data_dir: str = "data"
     image_size: int | None = None  # None → use the backbone's native input resolution
     val_fraction: float = 0.1
+    # If set, hold out this whole document `type` for validation (Leave-One-Domain-Out,
+    # e.g. "MAURITIUS/ID"); when None, use the random stratified split + val_fraction.
+    val_doc_type: str | None = None
 
     # model
     backbone: str = "tf_efficientnetv2_s.in21k"
