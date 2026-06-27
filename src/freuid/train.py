@@ -182,6 +182,9 @@ def main() -> None:
         model = build_model(cfg.backbone, cfg.pretrained).to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    # Cosine decay over the run: anneals LR toward 0 by the final epoch. Helps the
+    # pretrained RGB backbone settle rather than oscillating at a flat LR.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
 
     Path("checkpoints").mkdir(exist_ok=True)
     best_audet = float("inf")
@@ -189,8 +192,10 @@ def main() -> None:
         train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer)
         val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion)
         m = evaluate(val_scores, val_labels)
+        lr = scheduler.get_last_lr()[0]
+        scheduler.step()
         print(
-            f"epoch {epoch:>2}: train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+            f"epoch {epoch:>2}: lr={lr:.2e} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
             f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}"
         )
         if m["audet"] < best_audet:
