@@ -36,7 +36,7 @@ from freuid.utils import pick_device, seed_everything
 
 ID_COLUMN = "id"
 SCORE_COLUMN = "label"
-MISSING_DEFAULT = 0.0  # ids whose image is absent locally (filled for real on Kaggle)
+MISSING_DEFAULT = 0.5  # ids whose image is absent locally (filled for real on Kaggle)
 
 
 @torch.no_grad()
