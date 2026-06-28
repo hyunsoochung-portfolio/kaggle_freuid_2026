@@ -238,3 +238,6 @@ kaggle.json
 # smoke-test mini dataset (not for VCS)
 data_smoke/
 data_smoke_*.zip
+
+# macOS
+.DS_Store
