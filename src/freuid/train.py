@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, stratified_split
+from freuid.data import FreuidDataset, domain_holdout_split, stratified_split
 from freuid.metrics import evaluate
 from freuid.models import build_model
 from freuid.transforms import build_transforms, resolve_data_config
@@ -63,7 +63,10 @@ def run_epoch(model, loader, device, criterion, optimizer=None):
 
 
 def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
-    train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+    if cfg.val_types:  # cross-domain: hold out whole document types as validation
+        train_ids, val_ids = domain_holdout_split(cfg.data_dir, cfg.val_types)
+    else:
+        train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
     if cfg.limit:
         # deterministic subset (sorted by id) for fast dev/smoke runs
         train_ids = set(sorted(train_ids)[: cfg.limit])

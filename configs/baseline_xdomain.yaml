@@ -1,0 +1,22 @@
+# Cross-domain validation: hold out a whole document type as val, so the model is judged on a
+# domain it never trained on. Use this when the random split is trivially easy (great on val,
+# poor on the leaderboard). Fast Colab-style settings so it finishes in one session.
+name: baseline_xdomain
+seed: 42
+
+# data
+data_dir: data
+image_size: 224
+val_fraction: 0.1            # ignored when val_types is set
+val_types: ["MAURITIUS/ID"]  # held out entirely as val; train sees only the other 4 types
+
+# model
+backbone: tf_efficientnetv2_s.in21k
+pretrained: true
+
+# train
+epochs: 2
+batch_size: 64
+lr: 0.0003
+weight_decay: 0.0001
+num_workers: 4

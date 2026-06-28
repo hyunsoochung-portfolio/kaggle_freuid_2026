@@ -133,3 +133,23 @@ def stratified_split(
         val_ids.update(rng.choice(ids, size=n_val, replace=False).tolist())
     all_ids = set(df["id"])
     return all_ids - val_ids, val_ids
+
+
+def domain_holdout_split(root: str | Path, val_types: list[str]) -> tuple[set[str], set[str]]:
+    """Cross-domain split: hold out whole document ``type``s as validation.
+
+    ``val`` = all train ids whose ``type`` is in ``val_types``; ``train`` = the rest. Unlike
+    ``stratified_split`` (which keeps every type in both halves), this forces the model to be
+    judged on document types it never saw in training — the competition's cross-domain goal, and
+    a far more honest local estimate when the random split is trivially easy.
+    """
+    df = load_labels(root, "train")
+    wanted = set(val_types)
+    present = set(df["type"].dropna().unique())
+    missing = wanted - present
+    if missing:
+        raise ValueError(
+            f"val_types {sorted(missing)} not in data; available: {sorted(present)}"
+        )
+    is_val = df["type"].isin(wanted)
+    return set(df.loc[~is_val, "id"]), set(df.loc[is_val, "id"])

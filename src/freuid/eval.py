@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, stratified_split
+from freuid.data import FreuidDataset, domain_holdout_split, stratified_split
 from freuid.metrics import evaluate
 from freuid.models import build_model
 from freuid.transforms import build_transforms, resolve_data_config
@@ -62,8 +62,11 @@ def main() -> None:
     device = pick_device()
     data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
 
-    # Same held-out validation ids as training (same seed + val_fraction).
-    _, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+    # Same held-out validation ids as training (cross-domain holdout if val_types is set).
+    if cfg.val_types:
+        _, val_ids = domain_holdout_split(cfg.data_dir, cfg.val_types)
+    else:
+        _, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
     transform = build_transforms(data_cfg["image_size"], False, data_cfg["mean"], data_cfg["std"])
     ds = FreuidDataset(cfg.data_dir, "train", transform, ids=val_ids)
     loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
