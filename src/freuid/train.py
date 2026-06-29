@@ -240,10 +240,10 @@ def main() -> None:
             pm = _run_probe(model, probe_loader, device, criterion, probe_seed)
             m["probe_audet"] = pm["audet"]
             m["probe_apcer_at_1pct_bpcer"] = pm["apcer_at_1pct_bpcer"]
-            probe_str = f" probe_AuDET={m['probe_audet']:.4f}"
+            probe_str = f" probe_AuDET={m['probe_audet']:.6f}"
 
         print(
-            f"epoch {epoch:>2}: lr={lr:.2e} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+            f"\n[epoch {epoch:>2}/{cfg.epochs}] lr={lr:.2e} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
             f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}{probe_str}"
         )
 
@@ -255,7 +255,7 @@ def main() -> None:
                 {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
                 ckpt,
             )
-            print(f"  -> saved {ckpt} ({ckpt_key}={best_metric:.4f})")
+            print(f"  -> saved {ckpt} ({ckpt_key}={best_metric:.6f})")
 
 
 if __name__ == "__main__":
