@@ -38,8 +38,11 @@ class Config:
 
 
 def load_config(path: str | Path) -> Config:
-    raw = yaml.safe_load(Path(path).read_text()) or {}
-    known = {f.name for f in Config.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-    extra = {k: v for k, v in raw.items() if k not in known}
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    # `extra` is handled separately so it isn't passed twice when the YAML has an
+    # explicit `extra:` block (new style) AND unknown top-level keys (legacy style).
+    known = {f.name for f in Config.__dataclass_fields__.values()} - {"extra"}  # type: ignore[attr-defined]
+    explicit_extra: dict = raw.pop("extra", {}) or {}
+    legacy_extra = {k: v for k, v in raw.items() if k not in known}
     base = {k: v for k, v in raw.items() if k in known}
-    return Config(**base, extra=extra)
+    return Config(**base, extra={**explicit_extra, **legacy_extra})

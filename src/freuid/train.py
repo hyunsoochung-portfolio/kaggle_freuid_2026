@@ -77,7 +77,8 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
         train_ids = set(sorted(train_ids)[: cfg.limit])
         val_ids = set(sorted(val_ids)[: max(1, cfg.limit // 5)])
     size, mean, std = data_cfg["image_size"], data_cfg["mean"], data_cfg["std"]
-    train_tf = build_transforms(size, True, mean, std)
+    augment = cfg.extra.get("augment")
+    train_tf = build_transforms(size, True, mean, std, augment=augment)
     val_tf = build_transforms(size, False, mean, std)
     train_ds = FreuidDataset(cfg.data_dir, "train", train_tf, ids=train_ids)
     val_ds = FreuidDataset(cfg.data_dir, "train", val_tf, ids=val_ids)

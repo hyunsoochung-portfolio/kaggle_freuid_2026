@@ -1,0 +1,50 @@
+# configs/baseline_v0.yaml
+# S0 — the simplest trustworthy baseline. Reuses the existing full-image baseline path
+# (timm backbone, num_classes=1). The S0 on-ramp prompts add the new keys under `extra`.
+
+name: baseline_v0
+seed: 42
+data_dir: data
+
+# --- model (simple on purpose; bump to efficientnetv2 in S1) ---
+backbone: resnet18
+pretrained: true
+image_size: 256
+
+# --- optimisation ---
+epochs: 15
+batch_size: 64
+lr: 3.0e-4
+weight_decay: 1.0e-4
+num_workers: 8
+
+# --- in-domain split (stratified; all types in train and val) ---
+# val_doc_type is intentionally unset → stratified_split is used.
+val_fraction: 0.1
+
+# --- S0 additions (land in cfg.extra; implemented by s0_onramp_prompts.md) ---
+extra:
+  # Augmentation: apply the print-and-capture / analog pipeline to TRAIN only.
+  # Must not include any horizontal flip.
+  augment: recapture
+
+  # Recapture probe: build an analog-degraded copy of the val split and evaluate it
+  # every epoch. This is the compass.
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+
+  # Checkpoint on the LOWEST recapture-probe AuDET (not in-domain AuDET, not val_loss).
+  checkpoint_metric: probe_audet
+
+  # Inference: default any genuinely-missing test id to 0.5 (NOT 0.0); run the
+  # submission integrity check after writing.
+  missing_id_score: 0.5
+
+  # Multi-fold LODO is an evaluation harness (scripts/evaluate.py), not used during this
+  # single training run. Listed here for that harness.
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
