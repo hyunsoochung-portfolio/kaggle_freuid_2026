@@ -50,6 +50,80 @@ def predict_scores(model, loader, device) -> list[float]:
     return scores
 
 
+def _rank_normalize(arr) -> list[float]:
+    """Convert a score array to fractional ranks in (0, 1).
+
+    Uses average rank for ties. Result is in (0, 1) — never exactly 0.0
+    (guarding the submission integrity check).
+    """
+    import numpy as np
+    a = np.asarray(arr, dtype=np.float64)
+    n = len(a)
+    if n == 0:
+        return []
+    order = np.argsort(a, kind="stable")
+    ranks = np.empty(n, dtype=np.float64)
+    ranks[order] = np.arange(1, n + 1)
+    # average ties: find runs of equal values and replace their ranks with the mean
+    sorted_a = a[order]
+    i = 0
+    while i < n:
+        j = i + 1
+        while j < n and sorted_a[j] == sorted_a[i]:
+            j += 1
+        if j > i + 1:
+            avg = ranks[order[i:j]].mean()
+            ranks[order[i:j]] = avg
+        i = j
+    # map to (epsilon, 1-epsilon) so no exact zeros reach the integrity check
+    lo, hi = ranks.min(), ranks.max()
+    if hi > lo:
+        ranks = (ranks - lo) / (hi - lo) * (1 - 2e-7) + 1e-7
+    return ranks.tolist()
+
+
+def predict_scores_tta(
+    model,
+    device,
+    data_dir: str,
+    present_ids: set,
+    batch_size: int,
+    num_workers: int,
+    mean,
+    std,
+    scales: list[int],
+) -> list[tuple[str, float]]:
+    """Multi-scale TTA: run inference at each scale, rank-average, return (id, score) pairs.
+
+    No horizontal flip — documents carry orientation.
+    Rank-averaging is used instead of score-averaging because AuDET is a rank
+    metric; averaging ranks is invariant to per-scale score calibration differences.
+    """
+    per_scale_scores: list[list[float]] = []
+    sample_ids: list[str] | None = None
+
+    for scale in scales:
+        tf = build_transforms(scale, False, mean, std)
+        ds = FreuidDataset(data_dir, "public_test", tf, ids=present_ids)
+        loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        if sample_ids is None:
+            sample_ids = [s.id for s in ds.samples]
+        scores = predict_scores(model, loader, device)
+        per_scale_scores.append(scores)
+        print(f"[tta] scale={scale}  scores: min={min(scores):.4f} max={max(scores):.4f}")
+
+    # Rank-average across scales
+    import numpy as np
+    n = len(per_scale_scores[0])
+    avg_ranks = np.zeros(n, dtype=np.float64)
+    for scores in per_scale_scores:
+        ranked = _rank_normalize(scores)
+        avg_ranks += np.array(ranked)
+    avg_ranks /= len(per_scale_scores)
+
+    return list(zip(sample_ids or [], avg_ranks.tolist()))
+
+
 def check_submission(path: str | Path) -> None:
     """Print an integrity report for a finished submission CSV.
 
@@ -156,13 +230,34 @@ def main() -> None:
         )
 
     data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
-    transform = build_transforms(data_cfg["image_size"], False, data_cfg["mean"], data_cfg["std"])
-    ds = FreuidDataset(cfg.data_dir, "public_test", transform, ids=present_ids)
-    loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
-    scores = predict_scores(model, loader, device)
-    id_to_score: dict[str, float] = dict(
-        zip((s.id for s in ds.samples), scores, strict=True)
-    )
+    base_size = data_cfg["image_size"]
+    mean, std = data_cfg["mean"], data_cfg["std"]
+
+    tta_cfg = cfg.extra.get("tta", False)
+    if tta_cfg:
+        if isinstance(tta_cfg, list):
+            tta_scales = [int(s) for s in tta_cfg]
+        else:
+            # default: ±64px around the trained resolution (stays divisible by 32)
+            step = max(32, (base_size // 6) & ~31)
+            tta_scales = [base_size - step, base_size, base_size + step]
+        print(f"[tta] scales={tta_scales}")
+        id_score_pairs = predict_scores_tta(
+            model, device,
+            data_dir=cfg.data_dir,
+            present_ids=present_ids,
+            batch_size=cfg.batch_size,
+            num_workers=cfg.num_workers,
+            mean=mean, std=std,
+            scales=tta_scales,
+        )
+        id_to_score: dict[str, float] = dict(id_score_pairs)
+    else:
+        transform = build_transforms(base_size, False, mean, std)
+        ds = FreuidDataset(cfg.data_dir, "public_test", transform, ids=present_ids)
+        loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
+        scores = predict_scores(model, loader, device)
+        id_to_score = dict(zip((s.id for s in ds.samples), scores, strict=True))
 
     submission[SCORE_COLUMN] = submission[ID_COLUMN].map(
         lambda i: id_to_score.get(i, missing_score)

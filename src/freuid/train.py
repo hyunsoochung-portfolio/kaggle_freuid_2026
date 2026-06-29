@@ -19,31 +19,36 @@ from tqdm import tqdm
 
 from freuid.config import Config, load_config
 from freuid.data import FreuidDataset, lodo_split, stratified_split
+from freuid.loss import combined_loss
 from freuid.metrics import evaluate
 from freuid.models import build_model
 from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
 
-def run_epoch(model, loader, device, criterion, optimizer=None):
+def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: float = 0.0):
     """One pass. With an optimizer it trains; without, it evaluates.
 
     Returns (mean_loss, scores, labels) where scores = P(fraud). In train mode the
     scores/labels are not collected (they would force a GPU->CPU sync every batch and
     are unused), so both are returned as None.
+
+    auc_weight > 0 adds a pairwise soft-AUC term to the BCE loss (train only).
+    auc_weight = 0.0 is bit-for-bit identical to plain BCE.
     """
     is_train = optimizer is not None
     model.train(is_train)
     total_loss, n_seen, all_scores, all_labels = 0.0, 0, [], []
     for imgs, labels in tqdm(loader, leave=False):
         imgs = imgs.to(device)
-        targets = labels.float().unsqueeze(1).to(device)
+        labels_dev = labels.to(device)
         # eval 모드에서는 불필요한 그래디언트 계산을 끄는 컨텍스트 매니저
         with torch.set_grad_enabled(is_train):
             # 모델 forward() 호출. imgs [B, 3, H, W] -> logits [B, 1] (B=batch_size)
             logits = model(imgs)
-            # B개의 샘플에 대한 BCEWithLogitsLoss 계산. logits [B, 1], targets [B, 1] -> loss [1]
-            loss = criterion(logits, targets)
+            # BCE + optional pairwise AUC term (train only; val always uses plain BCE)
+            _aw = auc_weight if is_train else 0.0
+            loss = combined_loss(logits, labels_dev, criterion, _aw)
             if is_train:
                 optimizer.zero_grad()
                 loss.backward()
@@ -57,7 +62,7 @@ def run_epoch(model, loader, device, criterion, optimizer=None):
             # logits [B, 1] -> scores [B] (P(fraud) in [0, 1]).
             # 나중에 이걸 다 모아 AuDET 계산(metrics.py)에 씀.
             all_scores.append(torch.sigmoid(logits).squeeze(1).float().cpu())
-            all_labels.append(labels)
+            all_labels.append(labels_dev.cpu())
     mean_loss = total_loss / max(n_seen, 1)
     if is_train:
         return mean_loss, None, None
@@ -242,6 +247,10 @@ def main() -> None:
     # pretrained RGB backbone settle rather than oscillating at a flat LR.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
 
+    auc_weight = float(cfg.extra.get("auc_loss_weight", 0.0))
+    if auc_weight > 0.0:
+        print(f"[train] auc_loss_weight={auc_weight} (pairwise soft-AUC term active)")
+
     # Checkpoint criterion: "probe_audet" (recapture compass) or "audet" (in-domain).
     ckpt_key = cfg.extra.get("checkpoint_metric", "audet")
     probe_seed = cfg.extra.get("recapture_probe_seed", 0)
@@ -249,7 +258,7 @@ def main() -> None:
     Path("checkpoints").mkdir(exist_ok=True)
     best_metric = float("inf")
     for epoch in range(1, cfg.epochs + 1):
-        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer)
+        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer, auc_weight)
         val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion)
         m = evaluate(val_scores, val_labels)
         lr = scheduler.get_last_lr()[0]

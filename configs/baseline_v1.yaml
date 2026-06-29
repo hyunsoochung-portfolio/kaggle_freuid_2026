@@ -1,0 +1,54 @@
+# configs/baseline_v1.yaml
+# S1 — stronger backbone + synth tamper + pairwise AUC loss + TTA at inference.
+# Everything else (probe checkpointing, sanity checks, integrity) is unchanged from S0.
+#
+# build_model passes this name straight through to timm.create_model, so any
+# timm backbone name works here — no code changes needed to swap the backbone.
+
+name: baseline_v1
+seed: 42
+data_dir: data
+
+# ConvNeXt-Small pretrained on IN22k + fine-tuned on IN1k.
+# Architecturally different from EfficientNetV2 (depthwise vs grouped conv);
+# IN22k gives richer semantic priors. Native 224px but we override to 384px.
+backbone: convnext_small.fb_in22k_ft_in1k
+pretrained: true
+image_size: 384
+
+epochs: 20
+batch_size: 32        # smaller batch: ConvNeXt-Small is ~50% heavier than EV2-S
+lr: 2.0e-4
+weight_decay: 5.0e-2  # ConvNeXt was tuned with higher wd
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  # Augmentation: print-and-capture pipeline (no flip)
+  augment: recapture
+
+  # Synthetic tamper: 30% of bona-fide per batch become synthetic positives
+  synth_tamper_prob: 0.3
+
+  # Pairwise soft-AUC term: pushes fraud scores above bona-fide scores.
+  # 0.0 = pure BCE (reproduces S0 loss exactly); 0.1 = 10% AUC penalty.
+  auc_loss_weight: 0.1
+
+  # Recapture probe: the compass — checkpoint on lowest probe AuDET
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  # Inference: TTA at three scales (rank-averaged, no flip)
+  # true = auto [320, 384, 448]; or a list: [320, 384, 448]
+  tta: true
+
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
