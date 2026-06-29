@@ -1,119 +1,114 @@
-# CLAUDE.md — FREUID Challenge 2026
+# CLAUDE.md
 
-Kaggle team workspace for **[The FREUID Challenge 2026](https://www.kaggle.com/competitions/the-freuid-challenge-2026-ijcai-ecai/overview)** (IJCAI-ECAI, Bremen, Aug 2026).
-Binary fraud detection on identity documents. **Label 1 = fraud, 0 = bona-fide. Output = continuous fraud score P(fraud). Metric = AuDET, lower is better.**
+Context for building this project. Read before writing code.
 
-Full competition brief: `docs/competition.md`. End-to-end workflow: `docs/workflow.md`.
+## Project
 
----
+FREUID Challenge 2026 — binary fraud detection on identity-document images. Output a continuous
+fraud score `P(fraud) ∈ [0,1]` (never a hard label); `1 = fraud`, `0 = bona-fide`. Primary metric
+**AuDET** (area under the DET curve; repo proxy `1 - roc_auc_score`, **lower is better**);
+secondary **APCER @ 1% BPCER**. Both are rank metrics — only score _ordering_ matters, not
+calibration.
 
-## Repo map
+The real test is hard on purpose: **print-and-capture ("analog hole") attacks** and **document
+types not seen in training**, while the training data is ~99.97% digital. A previous
+forensic-noise model scored ~0.0006 locally but ~0.377 public — it leaned on digital noise that
+reprinting erases, and was validated on an easy in-domain split. We are rebuilding to be
+analog-robust and to generalize across document types.
 
-```
-configs/                   # One YAML per experiment — committed, never hardcode params in code
-  baseline.yaml            # EfficientNetV2-S 384px, 20 epochs (production baseline)
-  smoke.yaml               # 2 epochs, limit=100, data_smoke/ — quick wiring check
-  overlay_detector.yaml    # Two-stream (Bayar noise + ResNet34 RGB) face-region model
+## The plan
 
-src/freuid/
-  config.py                # Config dataclass + load_config(yaml); unknown keys → cfg.extra
-  data.py                  # FreuidDataset, OverlayDataset, load_labels, stratified_split
-                           # Resolves the double-nested Kaggle layout (train/train/<id>.jpeg)
-  transforms.py            # build_transforms, get_overlay_{train,val}_transforms, resolve_data_config
-  models/
-    baseline.py            # build_model(backbone, pretrained) — timm + 1 fraud logit
-    overlay.py             # TwoStreamOverlayNet: BayarConv2d / SRMConv2d noise stream + RGB backbone
-    __init__.py            # exports build_model, build_overlay_model
-  metrics.py               # audet(), apcer_at_bpcer(), evaluate() — local offline ranking
-  train.py                 # Entrypoint: python -m freuid.train --config <yaml>
-  infer.py                 # Entrypoint: python -m freuid.infer --checkpoint <pt> --out <csv>
-  utils.py                 # seed_everything(), pick_device()
+Build incrementally — one change at a time, each version trustworthy and submittable before the
+next — toward a frozen-foundation, consistency-based detector.
 
-data/                      # GITIGNORED — proprietary FREUID data (never commit)
-  train_labels.csv         # columns: id, image_path, label, is_digital, type
-  train/train/<id>.jpeg
-  public_test/public_test/<id>.jpeg
-  sample_submission.csv    # all test ids; your label column = fraud score [0,1]
-  train_sample/            # tiny labelled sample for smoke tests
+Start with the simplest thing that works: a single pretrained CNN on the full image producing a
+fraud score, with the validation, augmentation, and submission machinery correct from the start.
+Then strengthen it — a stronger backbone, a ranking-aware loss, synthetic analog tampering that
+manufactures print-and-capture fraud positives from clean images, and test-time augmentation.
 
-data/processed/
-  overlay_crops/           # face-region crops cached by OverlayDataset / precache_crops()
+Then change the feature extractor: swap the CNN for a **frozen DINOv3 backbone** with a light head
+on top, holding everything else fixed so the comparison is clean. Then add the analog-robust core
+— a **patch self-consistency** head and a **face-region consistency** head on the frozen patch
+features (which brings in document rectification and face detection as cached preprocessing),
+fused into a single score.
 
-checkpoints/               # GITIGNORED — model weights *.pt (state_dict + config + metrics)
-submissions/               # GITIGNORED — generated id,label CSVs
+Finally, push the rank metric: a second frozen backbone rank-averaged in, multi-seed/fold
+averaging, and optional light fine-tuning of the backbone's last blocks. Semantic/OCR features
+come afterward, only once the above is validated.
 
-notebooks/                 # EDA / exploration — clear outputs before committing
-report/                    # Mandatory technical report + experiments.md run log
-scripts/
-  download_data.sh         # Kaggle CLI download → data/
-  pull_submissions.sh      # Helper to pull submission files
+## Invariants (true throughout)
 
-tests/
-  test_metrics.py          # Sanity checks for audet / apcer_at_bpcer / evaluate
-```
+- `1 = fraud`, `0 = bona-fide` everywhere; **lower AuDET is better** — checkpoint on the lowest
+  recapture-probe AuDET.
+- **No horizontal flip** — documents carry orientation; augmentation must never flip.
+- Rebuild image paths from `id` as `{split}/{split}/{id}.jpeg`; the CSV `image_path` column is
+  unreliable.
+- Inference defaults any genuinely-missing test id to **0.5** (rank-neutral), never 0.0; run a
+  submission integrity check (unique-score count, exact-zeros, min/max).
+- The DINOv3 backbone is **frozen** (`requires_grad=False`, `eval()`, autocast) until the final
+  fine-tune step; only heads/fusion train before that.
+- Detectors and the backbone run **once** and are cached; precache before training, single-process
+  (do not fork the detectors).
+- Checkpoints store the **full config** so inference rebuilds the exact model and preprocessing.
+- Changes are **additive and gated on config flags**; never silently alter existing behavior.
 
----
+## Models
 
-## Commands
+Frozen backbone: **DINOv3 ViT-B/16** (fallback **DINOv2 ViT-B/14**, Apache-licensed, if DINOv3's
+gated license is a problem). Preprocessing: **FastSAM** (card rectification) and **SCRFD**
+(portrait box). Optional ensemble member: **DINOv3 ConvNeXt-Base**.
 
+Restriction: **do not use any model built for ID-fraud / presentation-attack detection, or general
+forgery-localization nets** (TruFor, CAT-Net, MVSS-Net, PSCC-Net, Noiseprint). Everything above is
+a general vision / segmentation / face model.
+
+## Validation (the part that was broken before)
+
+Do not trust single-domain LODO on the easiest type — it saturates and predicts nothing. Per epoch
+the **compass** is a **recapture probe**: apply the analog/print-and-capture augmentation to a
+held-out clean split and measure AuDET on it; checkpoint on the lowest probe AuDET. Periodically
+run **multi-fold LODO** (hold out each document type in turn, average) as the cross-domain check.
+Sanity checks: init BCE ≈ 0.693 on a balanced batch; a single batch must overfit to ~0.
+
+## Compute & environment
+
+Single **A100**. Strategy: freeze the big model, train small heads, so the GPU mostly does one-time
+cached forward passes. Use **AMP** (autocast + GradScaler). Don't cache full patch grids for the
+whole dataset if storage is tight — recompute the frozen forward on the fly, or cache pooled
+features keyed by `id`. On the workspace, work under `/root` (it persists across restarts): keep
+the environment, dataset, feature cache, and checkpoints there.
+
+### VESSL workspace (`freuid-hy`)
+
+- **SSH alias:** `freuid-hy` — configured in `~/.ssh/config`, key at `~/.ssh/freuid.pem`
+- **Repo:** `/root/repo` (cloned, on branch `rebuild/consistency-v1`)
+- **Python:** `/opt/conda/bin/python3` (conda, not system Python)
+- **Data:** `/root/repo/data/` — 69,352 train + 7,821 test images, gitignored, never touched by git
+- **Checkpoints / submissions:** `/root/repo/checkpoints/`, `/root/repo/submissions/`
+- **Training logs:** `/tmp/train_<config-name>.log`
+
+Always start training with `nohup` so it persists after SSH disconnects:
 ```bash
-# Setup
-uv sync                    # runtime env
-uv sync --extra dev        # + ruff + pytest
-uv sync --extra track      # + wandb (optional)
-
-# Sanity checks
-uv run python -m freuid.metrics    # prints perfect / random metric values
-uv run pytest -q                   # metric unit tests
-
-# Data
-bash scripts/download_data.sh      # download competition archive into data/
-
-# Train (standard timm backbone)
-uv run python -m freuid.train --config configs/baseline.yaml
-
-# Train (overlay / two-stream model)
-uv run python -m freuid.train --config configs/overlay_detector.yaml
-
-# Inference → submission csv
-uv run python -m freuid.infer \
-    --checkpoint checkpoints/baseline.pt \
-    --out submissions/baseline.csv
-# backbone/image_size always come from the checkpoint; --config is optional
-
-# Submit to Kaggle
-uv run kaggle competitions submit \
-    -c the-freuid-challenge-2026-ijcai-ecai \
-    -f submissions/baseline.csv \
-    -m "baseline effnetv2_s, val AuDET=0.xx"
-
-# Lint
-uv run ruff check src tests
+ssh freuid-hy "cd /root/repo && nohup /opt/conda/bin/python3 -m freuid.train \
+    --config configs/<name>.yaml > /tmp/train_<name>.log 2>&1 &"
 ```
 
----
+Check progress (strips tqdm noise):
+```bash
+ssh freuid-hy "grep -av 'it/s\|it]' /tmp/train_<name>.log"
+```
 
-## Key design decisions
+Pull code changes to workspace (git never touches `data/`):
+```bash
+ssh freuid-hy "cd /root/repo && git checkout -- notebooks/ && git pull origin <branch>"
+```
 
-- **One config drives one run.** `configs/<exp>.yaml` → `train` → `checkpoints/<name>.pt` → `infer` → `submissions/<name>.csv`. Commit the config; checkpoint and submission are gitignored.
-- **backbone/image_size come from the checkpoint at inference**, not the config, so weights always match their preprocessing.
-- **`model_type: overlay` in `cfg.extra`** switches train.py and infer.py to the two-stream path (`OverlayDataset`, `build_overlay_model`). The standard path uses `FreuidDataset` and `build_model`.
-- **No horizontal flip** in augmentation — documents have text and orientation, and flipping destroys document semantics.
-- **MTCNN is a singleton** (`_mtcnn_instance` in data.py) and is not fork-safe — `num_workers: 0` is required for the overlay model.
-- **AuDET proxy**: `metrics.py` uses `1 − ROC AUC` as a linear-axis proxy, not byte-identical to the official Kaggle DET scorer. Use it for relative ranking; reconcile with the official scorer before trusting absolute values.
-- **Stratified split** in `stratified_split()` stratifies on `(label, type)` to keep all 7 document domains represented in validation. This is the default (in-domain) signal.
-- **Leave-One-Domain-Out (opt-in)**: set `val_doc_type:` in a config (e.g. `MAURITIUS/ID`) to hold out one whole document `type` for validation via `lodo_split()`. Train and val then share no domain, so val AuDET measures cross-domain transfer — a more honest proxy for the unseen-domain private test. Leave `val_doc_type` unset to fall back to the stratified split.
+Use `/vessl` skill for common workspace tasks.
 
-## Adding experiments
+## Conventions
 
-**New config only (90% of cases):** copy `configs/baseline.yaml`, rename, change `name:` (sets the checkpoint filename), tweak hyperparams, commit. Any [timm](https://github.com/huggingface/pytorch-image-models) model name works in `backbone:`.
-
-**New model:** add `src/freuid/models/<your_model>.py` returning an `nn.Module` with a single fraud logit, then extend `build_model` dispatch in `models/__init__.py`.
-
-**Log every run worth keeping** in `report/experiments.md` with local val AuDET + APCER@1%BPCER.
-
-## Branch / PR conventions
-
-`main` stays runnable. Branch `feat/<name>` or `fix/<name>` → PR → review → merge. Keep PRs scoped to one experiment's config + any code it needs.
-
-**Submission deadline: 2026-07-14** (verify exact time on the Kaggle page).
+Config via the existing `Config` dataclass; new knobs go through `cfg.extra` (`model_type`,
+`backbone_name`, `image_size`, feature/head flags). Seed from `cfg.seed`. Loss:
+`BCEWithLogitsLoss`, optionally a pairwise soft-AUC term. Log per epoch:
+`lr, train_loss, val_loss, AuDET, APCER@1%BPCER, probe_AuDET`. Keep both the baseline CNN path and
+the frozen-backbone path (`model_type: consistency`) working.
