@@ -9,6 +9,8 @@ competition metrics, and checkpoints the best AuDET to checkpoints/<name>.pt.
 from __future__ import annotations
 
 import argparse
+import math
+import random
 from pathlib import Path
 
 import torch
@@ -69,7 +71,9 @@ def _split_ids(cfg: Config) -> tuple[set[str], set[str]]:
     return stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
 
 
-def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
+def build_loaders(
+    cfg: Config, data_cfg: dict
+) -> tuple[DataLoader, DataLoader, DataLoader | None]:
     # model_type dispatch: add new model types here (e.g. model_type="consistency")
     train_ids, val_ids = _split_ids(cfg)
     if cfg.limit:
@@ -106,12 +110,85 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
     #     imgs:   FloatTensor [B, 3, H, W]   (B=batch_size, 마지막 배치는 drop_last로 버려져 항상 B)
     #     labels: LongTensor  [B]            (각 0/1)
     # 예) batch_size=32, image_size=384 -> imgs [32, 3, 384, 384], labels [32]
-    return train_loader, val_loader
+
+    # Recapture probe: same val ids, recapture augmentation, deterministic per-epoch seed.
+    # num_workers=0 so numpy/random seeding in the main process controls augmentation.
+    probe_loader: DataLoader | None = None
+    if cfg.extra.get("use_recapture_probe"):
+        from freuid.augment import recapture_transforms
+        probe_tf = recapture_transforms(size, mean, std)
+        probe_ds = FreuidDataset(cfg.data_dir, "train", probe_tf, ids=val_ids)
+        probe_loader = DataLoader(
+            probe_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0,
+        )
+
+    return train_loader, val_loader, probe_loader
+
+
+def _run_probe(model, probe_loader, device, criterion, seed: int) -> dict[str, float]:
+    """Evaluate the degraded probe with a fixed seed so augmentation is the same each epoch."""
+    import numpy as np
+    random.seed(seed)
+    np.random.seed(seed)
+    _, scores, labels = run_epoch(model, probe_loader, device, criterion)
+    return evaluate(scores, labels)
+
+
+def _check_init_loss(model, loader, device, criterion, tol: float = 0.3) -> None:
+    """Assert that BCE on the first train batch ≈ ln(2) before any weight update.
+
+    A fresh classifier head (bias=0, small weights) outputs logits ≈ 0, so
+    sigmoid → 0.5 and BCE → ln(2) ≈ 0.693 on any class mix. Failing this usually
+    means labels are on the wrong scale, the head bias was initialised incorrectly,
+    or the loss function is mis-wired.
+    """
+    model.eval()
+    imgs, labels = next(iter(loader))
+    with torch.no_grad():
+        logits = model(imgs.to(device))
+        loss = criterion(logits, labels.float().unsqueeze(1).to(device)).item()
+    model.train()
+    expected = math.log(2)  # ≈ 0.693
+    assert abs(loss - expected) < tol, (
+        f"init BCE={loss:.4f} expected ≈{expected:.4f} (tol={tol}). "
+        "Check: labels not shuffled/inverted, loss not pre-averaged with wrong sign, "
+        "head bias not set to a constant."
+    )
+    print(f"[sanity] init BCE={loss:.4f} ~= ln2={expected:.4f} (tol={tol}) OK")
+
+
+def _sanity_overfit(model, loader, device, criterion, steps: int = 100, target: float = 0.02) -> None:
+    """Overfit a single batch to near-zero loss; asserts the forward+backward path works.
+
+    Runs on a COPY of the model so the real training weights are untouched.
+    Uses SGD (no momentum) so convergence is purely the model's capacity.
+    """
+    import copy
+    m = copy.deepcopy(model)
+    imgs, labels = next(iter(loader))
+    imgs = imgs.to(device)
+    targets = labels.float().unsqueeze(1).to(device)
+    opt = torch.optim.SGD(m.parameters(), lr=0.1)
+    m.train()
+    for _ in range(steps):
+        opt.zero_grad()
+        criterion(m(imgs), targets).backward()
+        opt.step()
+    final = criterion(m(imgs), targets).item()
+    assert final < target, (
+        f"sanity overfit: loss={final:.4f} after {steps} steps (target <{target}). "
+        "Check: gradient flow not blocked, model has enough capacity for one batch."
+    )
+    print(f"[sanity] single-batch overfit: loss={final:.6f} after {steps} steps OK")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--sanity", action="store_true",
+        help="run init-loss check + single-batch overfit check, then exit",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -123,38 +200,62 @@ def main() -> None:
         f"image_size={data_cfg['image_size']} mean={data_cfg['mean']}"
     )
 
-    train_loader, val_loader = build_loaders(cfg, data_cfg)
+    train_loader, val_loader, probe_loader = build_loaders(cfg, data_cfg)
     print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
+    if probe_loader is not None:
+        print(f"[train] probe={len(probe_loader.dataset)} (recapture, seed={cfg.extra.get('recapture_probe_seed', 0)})")
 
     # model_type dispatch: add new model types here (e.g. model_type="consistency")
     model = build_model(cfg.backbone, cfg.pretrained).to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
+
+    # Always check init loss before any weight updates.
+    _check_init_loss(model, train_loader, device, criterion)
+
+    if args.sanity:
+        _sanity_overfit(model, train_loader, device, criterion)
+        print("[sanity] all checks passed — exiting")
+        return
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     # Cosine decay over the run: anneals LR toward 0 by the final epoch. Helps the
     # pretrained RGB backbone settle rather than oscillating at a flat LR.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
 
+    # Checkpoint criterion: "probe_audet" (recapture compass) or "audet" (in-domain).
+    ckpt_key = cfg.extra.get("checkpoint_metric", "audet")
+    probe_seed = cfg.extra.get("recapture_probe_seed", 0)
+
     Path("checkpoints").mkdir(exist_ok=True)
-    best_audet = float("inf")
+    best_metric = float("inf")
     for epoch in range(1, cfg.epochs + 1):
         train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer)
         val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion)
         m = evaluate(val_scores, val_labels)
         lr = scheduler.get_last_lr()[0]
         scheduler.step()
+
+        probe_str = ""
+        if probe_loader is not None:
+            pm = _run_probe(model, probe_loader, device, criterion, probe_seed)
+            m["probe_audet"] = pm["audet"]
+            m["probe_apcer_at_1pct_bpcer"] = pm["apcer_at_1pct_bpcer"]
+            probe_str = f" probe_AuDET={m['probe_audet']:.4f}"
+
         print(
             f"epoch {epoch:>2}: lr={lr:.2e} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-            f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}"
+            f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}{probe_str}"
         )
-        if m["audet"] < best_audet:
-            best_audet = m["audet"]
+
+        current = m.get(ckpt_key, m["audet"])
+        if current < best_metric:
+            best_metric = current
             ckpt = Path("checkpoints") / f"{cfg.name}.pt"
-            # model 가중치 + config + epoch + metrics를 한 딕셔너리로 저장 (checkpoints/<name>.pt)
             torch.save(
                 {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
                 ckpt,
             )
-            print(f"  -> saved {ckpt} (AuDET={best_audet:.4f})")
+            print(f"  -> saved {ckpt} ({ckpt_key}={best_metric:.4f})")
 
 
 if __name__ == "__main__":
