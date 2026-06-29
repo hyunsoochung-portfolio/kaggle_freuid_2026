@@ -293,22 +293,6 @@ nvtx = [
 ]
 
 [[package]]
-name = "facenet-pytorch"
-version = "2.5.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "pillow" },
-    { name = "requests" },
-    { name = "torchvision" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/80/cd/29d55c5d8675c7f8892c9b79288b633cd97b276d8fb24952f1e74fb7bfcc/facenet-pytorch-2.5.3.tar.gz", hash = "sha256:98cc5b42a48f837c023eb92f2a571cd4ac6a46687c5e71b9e99b491087273e2b", size = 1885286, upload-time = "2023-04-06T17:18:34.574Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/40/c1/0a15058f478c8f0f29cacb6e35530b97ead780be99737e62810e71dc477e/facenet_pytorch-2.5.3-py3-none-any.whl", hash = "sha256:b8002c3ee7a3af471c433cbda1fdcab9ae2d46a4aac43435ba08259c45ffc884", size = 1882784, upload-time = "2023-04-06T17:18:31.793Z" },
-]
-
-[[package]]
 name = "fastjsonschema"
 version = "2.21.2"
 source = { registry = "https://pypi.org/simple" }
@@ -332,7 +316,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "albumentations" },
-    { name = "facenet-pytorch" },
     { name = "kaggle" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -359,7 +342,6 @@ track = [
 [package.metadata]
 requires-dist = [
     { name = "albumentations", specifier = ">=1.4" },
-    { name = "facenet-pytorch", specifier = ">=2.5.3" },
     { name = "kaggle", specifier = ">=2.2" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "pandas", specifier = ">=2.2" },

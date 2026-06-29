@@ -16,22 +16,10 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import (
-    FreuidDataset,
-    OverlayDataset,
-    lodo_split,
-    resolve_cache_dir,
-    stratified_split,
-)
+from freuid.data import FreuidDataset, lodo_split, stratified_split
 from freuid.metrics import evaluate
 from freuid.models import build_model
-from freuid.models.overlay import build_overlay_model
-from freuid.transforms import (
-    build_transforms,
-    get_overlay_train_transforms,
-    get_overlay_val_transforms,
-    resolve_data_config,
-)
+from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
 
@@ -82,8 +70,7 @@ def _split_ids(cfg: Config) -> tuple[set[str], set[str]]:
 
 
 def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
-    if cfg.extra.get("model_type") == "overlay":
-        return build_overlay_loaders(cfg)
+    # model_type dispatch: add new model types here (e.g. model_type="consistency")
     train_ids, val_ids = _split_ids(cfg)
     if cfg.limit:
         # deterministic subset (sorted by id) for fast dev/smoke runs
@@ -121,37 +108,6 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
     return train_loader, val_loader
 
 
-def build_overlay_loaders(cfg: Config) -> tuple[DataLoader, DataLoader]:
-    train_ids, val_ids = _split_ids(cfg)
-    if cfg.limit:
-        train_ids = set(sorted(train_ids)[: cfg.limit])
-        val_ids = set(sorted(val_ids)[: max(1, cfg.limit // 5)])
-    ov = cfg.extra.get("overlay", {})
-    crop_kw = dict(
-        crop_margin=ov.get("crop_margin", 0.75),
-        cache_dir=resolve_cache_dir(cfg),
-        detect_long_side=ov.get("detect_long_side", 1024),
-        min_face_size=ov.get("min_face_size", 60),
-    )
-    train_ds = OverlayDataset(
-        cfg.data_dir, "train", get_overlay_train_transforms(cfg.image_size or 224),
-        ids=train_ids, **crop_kw,
-    )
-    val_ds = OverlayDataset(
-        cfg.data_dir, "train", get_overlay_val_transforms(cfg.image_size or 224),
-        ids=val_ids, **crop_kw,
-    )
-    pin_memory = torch.cuda.is_available()
-    train_loader = DataLoader(
-        train_ds, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=0, pin_memory=pin_memory, drop_last=True,
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0,
-    )
-    return train_loader, val_loader
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -160,26 +116,17 @@ def main() -> None:
     cfg = load_config(args.config)
     seed_everything(cfg.seed)
     device = pick_device()
-    is_overlay = cfg.extra.get("model_type") == "overlay"
-
-    if is_overlay:
-        img_size = cfg.image_size or 224
-        print(f"[train] config '{cfg.name}' | device={device} | model=overlay | image_size={img_size}")
-        data_cfg: dict = {}
-    else:
-        data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
-        print(
-            f"[train] config '{cfg.name}' | device={device} | backbone={cfg.backbone} | "
-            f"image_size={data_cfg['image_size']} mean={data_cfg['mean']}"
-        )
+    data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
+    print(
+        f"[train] config '{cfg.name}' | device={device} | backbone={cfg.backbone} | "
+        f"image_size={data_cfg['image_size']} mean={data_cfg['mean']}"
+    )
 
     train_loader, val_loader = build_loaders(cfg, data_cfg)
     print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
 
-    if is_overlay:
-        model = build_overlay_model(cfg).to(device)
-    else:
-        model = build_model(cfg.backbone, cfg.pretrained).to(device)
+    # model_type dispatch: add new model types here (e.g. model_type="consistency")
+    model = build_model(cfg.backbone, cfg.pretrained).to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     # Cosine decay over the run: anneals LR toward 0 by the final epoch. Helps the

@@ -28,10 +28,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, OverlayDataset, load_labels, precache_crops, resolve_cache_dir
+from freuid.data import FreuidDataset, load_labels
 from freuid.models import build_model
-from freuid.models.overlay import build_overlay_model
-from freuid.transforms import build_transforms, get_overlay_val_transforms, resolve_data_config
+from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
 ID_COLUMN = "id"
@@ -103,20 +102,12 @@ def main() -> None:
     cfg, state = resolve_config(args)
     seed_everything(cfg.seed)
     device = pick_device()
-    is_overlay = cfg.extra.get("model_type") == "overlay"
-
-    if is_overlay:
-        print(
-            f"[infer] model=overlay image_size={cfg.image_size or 224} (from checkpoint) | "
-            f"device={device} | data_dir={cfg.data_dir}"
-        )
-        model = build_overlay_model(cfg).to(device)
-    else:
-        print(
-            f"[infer] backbone={cfg.backbone} image_size={cfg.image_size} (from checkpoint) | "
-            f"device={device} | data_dir={cfg.data_dir}"
-        )
-        model = build_model(cfg.backbone, pretrained=False).to(device)
+    print(
+        f"[infer] backbone={cfg.backbone} image_size={cfg.image_size} (from checkpoint) | "
+        f"device={device} | data_dir={cfg.data_dir}"
+    )
+    # model_type dispatch: add new model types here (e.g. model_type="consistency")
+    model = build_model(cfg.backbone, pretrained=False).to(device)
     model.load_state_dict(state["model"])
     model.eval()
 
@@ -125,28 +116,12 @@ def main() -> None:
     present_ids = set(submission.loc[present_mask, "id"])
     print(f"[infer] {len(submission)} ids total; {len(present_ids)} images present locally")
 
-    if is_overlay:
-        precache_crops(cfg, splits=("public_test",))
-        ov = cfg.extra.get("overlay", {})
-        ds = OverlayDataset(
-            cfg.data_dir, "public_test",
-            get_overlay_val_transforms(cfg.image_size or 224),
-            ids=present_ids,
-            crop_margin=ov.get("crop_margin", 0.75),
-            cache_dir=resolve_cache_dir(cfg),
-            detect_long_side=ov.get("detect_long_side", 1024),
-            min_face_size=ov.get("min_face_size", 60),
-        )
-        loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
-        scores = predict_scores(model, loader, device)
-        id_to_score = dict(zip((s[0] for s in ds.samples), scores, strict=True))
-    else:
-        data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
-        transform = build_transforms(data_cfg["image_size"], False, data_cfg["mean"], data_cfg["std"])
-        ds = FreuidDataset(cfg.data_dir, "public_test", transform, ids=present_ids)
-        loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
-        scores = predict_scores(model, loader, device)
-        id_to_score = dict(zip((s.id for s in ds.samples), scores, strict=True))
+    data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
+    transform = build_transforms(data_cfg["image_size"], False, data_cfg["mean"], data_cfg["std"])
+    ds = FreuidDataset(cfg.data_dir, "public_test", transform, ids=present_ids)
+    loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
+    scores = predict_scores(model, loader, device)
+    id_to_score = dict(zip((s.id for s in ds.samples), scores, strict=True))
 
     submission[SCORE_COLUMN] = submission[ID_COLUMN].map(
         lambda i: id_to_score.get(i, MISSING_DEFAULT)

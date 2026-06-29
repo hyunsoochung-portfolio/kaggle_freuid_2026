@@ -10,10 +10,7 @@ backbone's own timm config so swapping ``backbone`` keeps preprocessing correct.
 
 from __future__ import annotations
 
-import albumentations as A
-
 from torchvision import transforms
-from albumentations.pytorch import ToTensorV2
 
 # Fallback only — used when a backbone isn't registered in timm.
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -59,24 +56,3 @@ def build_transforms(
 #          for t in self.transforms:             # 부품을 순서대로
 #              img = t(img)                       # 출력이 다음 입력으로
 #          return img
-
-# ---------------------------------------------------------------------------
-# Overlay pipeline transforms — no ImageNet normalization (raw [0,1] pixels)
-# ---------------------------------------------------------------------------
-
-def get_overlay_train_transforms(img_size: int) -> A.Compose:
-    return A.Compose([
-        A.Resize(img_size, img_size),
-        A.HorizontalFlip(p=0.5),
-        A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05, p=0.3),
-        A.ToFloat(max_value=255.0),
-        ToTensorV2(),
-    ])
-
-
-def get_overlay_val_transforms(img_size: int) -> A.Compose:
-    return A.Compose([
-        A.Resize(img_size, img_size),
-        A.ToFloat(max_value=255.0),
-        ToTensorV2(),
-    ])
