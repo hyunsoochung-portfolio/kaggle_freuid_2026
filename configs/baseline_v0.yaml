@@ -7,9 +7,9 @@ seed: 42
 data_dir: data
 
 # --- model (simple on purpose; bump to efficientnetv2 in S1) ---
-backbone: resnet18
+backbone: tf_efficientnetv2_s.in21k
 pretrained: true
-image_size: 256
+image_size: 384
 
 # --- optimisation ---
 epochs: 15
