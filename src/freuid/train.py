@@ -84,7 +84,27 @@ def build_loaders(
     augment = cfg.extra.get("augment")
     train_tf = build_transforms(size, True, mean, std, augment=augment)
     val_tf = build_transforms(size, False, mean, std)
-    train_ds = FreuidDataset(cfg.data_dir, "train", train_tf, ids=train_ids)
+
+    synth_prob = float(cfg.extra.get("synth_tamper_prob", 0.0))
+    if synth_prob > 0.0:
+        from freuid.augment import SynthTamperWrapper, recapture_transforms
+        _base_train_ds = FreuidDataset(cfg.data_dir, "train", None, ids=train_ids)
+        _tamper_tf = recapture_transforms(size, mean, std)
+        train_ds = SynthTamperWrapper(
+            _base_train_ds,
+            clean_transform=train_tf,
+            tamper_transform=_tamper_tf,
+            prob=synth_prob,
+            seed=cfg.seed,
+        )
+        _n_bona = sum(1 for s in _base_train_ds.samples if s.label == 0)
+        print(
+            f"[train] synth_tamper: prob={synth_prob:.2f} "
+            f"| {_n_bona} bona-fide → ~{int(_n_bona * synth_prob)} synthetic positives/epoch "
+            f"| donor_pool={len(train_ds._donor_pool)}"
+        )
+    else:
+        train_ds = FreuidDataset(cfg.data_dir, "train", train_tf, ids=train_ids)
     val_ds = FreuidDataset(cfg.data_dir, "train", val_tf, ids=val_ids)
     pin_memory = torch.cuda.is_available()  # unsupported/no-op on MPS, only helps CUDA
     train_loader = DataLoader(
