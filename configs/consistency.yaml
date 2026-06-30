@@ -40,7 +40,8 @@ extra:
   recapture_probe_seed: 1234
   checkpoint_metric: probe_audet
 
-  # TTA at inference: three scales, rank-averaged, no flip
-  tta: true
+  # TTA at inference: three scales, rank-averaged, no flip.
+  # Must all be multiples of patch_size=14 for DINOv2.  448=14x32, 518=14x37, 588=14x42.
+  tta: [448, 518, 588]
 
   missing_id_score: 0.5
