@@ -10,9 +10,9 @@ name: consistency_v0
 seed: 42
 data_dir: data
 
-backbone: dinov2_vitb14   # timm sentinel → ImageNet stats fallback (correct for DINO)
+backbone: dinov3_vitb16   # timm sentinel → ImageNet stats fallback (correct for DINO)
 pretrained: true
-image_size: 518           # must be divisible by patch_size; 518 = 14x37 (DINOv2 native)
+image_size: 512           # must be divisible by patch_size; 512 = 16x32 (DINOv3 patch_size=16)
 
 epochs: 20
 batch_size: 16            # smaller: ViT-B forward is heavier than ConvNeXt-Small
@@ -24,7 +24,7 @@ val_fraction: 0.1
 
 extra:
   model_type: consistency
-  backbone_name: dinov2_vitb14   # Apache 2.0; DINOv3 is gated — switch when access is resolved
+  backbone_name: dinov3_vitb16   # gated; HF_TOKEN required + license accepted on HF
 
   # Augmentation: print-and-capture pipeline (no flip)
   augment: recapture
@@ -41,7 +41,7 @@ extra:
   checkpoint_metric: probe_audet
 
   # TTA at inference: three scales, rank-averaged, no flip.
-  # Must all be multiples of patch_size=14 for DINOv2.  448=14x32, 518=14x37, 588=14x42.
-  tta: [448, 518, 588]
+  # Must all be multiples of patch_size=16 for DINOv3.  448=16x28, 512=16x32, 528=16x33.
+  tta: [448, 512, 528]
 
   missing_id_score: 0.5
