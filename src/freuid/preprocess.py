@@ -36,13 +36,24 @@ _scrfd: object = None
 # Detector loading
 # ---------------------------------------------------------------------------
 
+_FASTSAM_SEARCH = [
+    Path("/root/FastSAM-s.pt"),     # VESSL persistent workspace
+    Path.home() / "FastSAM-s.pt",  # generic home fallback
+    Path("FastSAM-s.pt"),           # cwd (ultralytics download target)
+]
+
+
 def _load_fastsam():
     global _fastsam
     if _fastsam is None:
         try:
             from ultralytics import FastSAM as _FS
-            _fastsam = _FS("FastSAM-s.pt")
-            print("[preprocess] FastSAM-s loaded")
+            model_path = next(
+                (p for p in _FASTSAM_SEARCH if p.exists()),
+                "FastSAM-s.pt",  # triggers auto-download to cwd
+            )
+            _fastsam = _FS(str(model_path))
+            print(f"[preprocess] FastSAM-s loaded from {model_path}")
         except Exception as exc:
             print(f"[preprocess] FastSAM unavailable ({exc}); will use resize fallback")
             _fastsam = "unavailable"
