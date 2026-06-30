@@ -12,7 +12,7 @@ data_dir: data
 
 backbone: dinov2_vitb14   # timm sentinel → ImageNet stats fallback (correct for DINO)
 pretrained: true
-image_size: 512
+image_size: 518           # must be divisible by patch_size; 518 = 14x37 (DINOv2 native)
 
 epochs: 20
 batch_size: 16            # smaller: ViT-B forward is heavier than ConvNeXt-Small
