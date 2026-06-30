@@ -214,9 +214,15 @@ def main() -> None:
         "--sanity", action="store_true",
         help="run init-loss check + single-batch overfit check, then exit",
     )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="cap train/val dataset sizes for quick smoke runs",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.limit is not None:
+        cfg.limit = args.limit
     seed_everything(cfg.seed)
     device = pick_device()
     data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
