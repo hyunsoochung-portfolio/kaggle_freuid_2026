@@ -24,8 +24,9 @@ Gate to advance: beat the constant-0.5 baseline **and** the previous stage on pr
 |--------|----------|--------|-------------------------|-----------|-----------------|-------|
 | baseline_v0 | tf_efficientnetv2_s.in21k | 15 | 0.000000 | — | TBD | S0 submitted |
 | baseline_v1 | convnext_small.fb_in22k_ft_in1k | 10 (best ep9) | 0.000039 | 0.0000 | TBD | synth p=0.3, auc_w=0.1, TTA 3-scale; submitted |
+| consistency_v0 | dinov2_vitb14 (frozen) + GlobalHead | 20 (best ep20) | 0.061290 | 0.0280 | TBD | 149K trainable, synth p=0.3, auc_w=0.1, TTA [448,518,588]; submitted |
 
-> Public LB for baseline_v0: update after checking Kaggle leaderboard.
+> Public LB for baseline_v0, baseline_v1, consistency_v0: update after checking Kaggle leaderboard.
 
 ---
 
@@ -36,6 +37,14 @@ Gate to advance: beat the constant-0.5 baseline **and** the previous stage on pr
 - [ ] baseline_v1 public LB AuDET < baseline_v0 public LB AuDET
 - [x] TTA submission integrity passed (rows=142818, zeros=0, range=[0.001238, 0.983369])
 - [x] auc_loss_weight=0.1 active — smoke run at 0.0 confirmed BCE-identical
+
+## S2 gate checklist
+
+- [x] consistency_v0 smoke: backbone frozen (149K trainable / 86.6M frozen), init BCE=0.6931 ✓
+- [x] consistency_v0 full train: probe_AuDET=0.0613 (best ep20), val_AuDET=0.0280
+- [x] TTA integrity passed (rows=142818, zeros=0, range=[0.000896, 1.0])
+- [ ] consistency_v0 public LB AuDET < 0.5 (constant-baseline)
+- [ ] consistency_v0 public LB AuDET < baseline_v1 public LB AuDET (S2 gate)
 
 ---
 
