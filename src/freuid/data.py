@@ -156,3 +156,29 @@ def stratified_split(
         val_ids.update(rng.choice(ids, size=n_val, replace=False).tolist())
     all_ids = set(df["id"])
     return all_ids - val_ids, val_ids
+
+
+def leave_one_out_folds(root: str | Path) -> list[tuple[str, set[str], set[str]]]:
+    """Leave-One-Out split by document type.
+
+    타입이 N개면 N개의 fold를 반환. 각 fold에서 타입 하나를 val로,
+    나머지 전부를 train으로 사용.
+
+    Returns list of (val_type, train_ids, val_ids).
+
+    Example (7 types A~G):
+        fold 0: A -> val  /  B,C,D,E,F,G -> train
+        fold 1: B -> val  /  A,C,D,E,F,G -> train
+        ...
+        fold 6: G -> val  /  A,B,C,D,E,F -> train
+    """
+    df = load_labels(root, "train")
+    types = sorted(df["type"].dropna().unique())  # 정렬해서 fold 순서 고정
+    all_ids = set(df["id"])
+    folds = []
+    for val_type in types:
+        val_ids = set(df[df["type"] == val_type]["id"])
+        train_ids = all_ids - val_ids
+        print(f"[fold] val_type={val_type!r} -> train={len(train_ids)} val={len(val_ids)}")
+        folds.append((val_type, train_ids, val_ids))
+    return folds

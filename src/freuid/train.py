@@ -16,9 +16,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, cross_domain_split, stratified_split
+from freuid.data import FreuidDataset, cross_domain_split, leave_one_out_folds, stratified_split
 from freuid.metrics import evaluate
-from freuid.models import build_model
+from freuid.models import build_model, build_dct_model
 from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
@@ -64,11 +64,17 @@ def run_epoch(model, loader, device, criterion, optimizer=None, label_smoothing=
     return mean_loss, torch.cat(all_scores).numpy(), torch.cat(all_labels).numpy()
 
 
-def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
-    if cfg.val_strategy == "cross_domain":
-        train_ids, val_ids = cross_domain_split(cfg.data_dir, cfg.val_domain_fraction, cfg.seed)
-    else:
-        train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+def build_loaders(
+    cfg: Config, data_cfg: dict,
+    train_ids: set[str] | None = None,
+    val_ids: set[str] | None = None,
+) -> tuple[DataLoader, DataLoader]:
+    # ids가 외부에서 주어지면 그걸 쓰고, 아니면 cfg.val_strategy로 분할
+    if train_ids is None or val_ids is None:
+        if cfg.val_strategy == "cross_domain":
+            train_ids, val_ids = cross_domain_split(cfg.data_dir, cfg.val_domain_fraction, cfg.seed)
+        else:
+            train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
     if cfg.limit:
         # deterministic subset (sorted by id) for fast dev/smoke runs
         train_ids = set(sorted(train_ids)[: cfg.limit])
@@ -108,23 +114,44 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--fold", type=int, default=None,
+        help="Leave-One-Out fold index (0-based). "
+             "None = single run with cfg.val_strategy. "
+             "'all' 대신 train_loo.py 사용 권장."
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     seed_everything(cfg.seed)
     device = pick_device()
-    # Pull normalization + input size from the backbone itself (cfg.image_size overrides
-    # the native resolution when set) so preprocessing always matches the pretrained model.
     data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
     print(
         f"[train] config '{cfg.name}' | device={device} | backbone={cfg.backbone} | "
         f"image_size={data_cfg['image_size']} mean={data_cfg['mean']}"
     )
 
-    train_loader, val_loader = build_loaders(cfg, data_cfg)
+    # --- fold 선택 ---
+    if args.fold is not None:
+        folds = leave_one_out_folds(cfg.data_dir)
+        if args.fold >= len(folds):
+            raise ValueError(f"--fold {args.fold} 범위 초과 (전체 {len(folds)}개 fold)")
+        val_type, train_ids, val_ids = folds[args.fold]
+        run_name = f"{cfg.name}_fold{args.fold}_{val_type.replace('/', '-')}"
+        print(f"[train] LOO fold {args.fold}: val_type={val_type!r}")
+    else:
+        train_ids, val_ids = None, None
+        run_name = cfg.name
+
+    train_loader, val_loader = build_loaders(cfg, data_cfg, train_ids, val_ids)
     print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
 
-    model = build_model(cfg.backbone, cfg.pretrained).to(device)
+    model = (
+        build_dct_model(cfg.backbone, cfg.pretrained)
+        if cfg.extra.get("use_dct", False)
+        else build_model(cfg.backbone, cfg.pretrained)
+    ).to(device)
+    print(f"[train] model={'DualStream(RGB+DCT)' if cfg.extra.get('use_dct') else 'baseline'}")
     criterion = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
@@ -132,7 +159,7 @@ def main() -> None:
     best_audet = float("inf")
     start_epoch = 1
 
-    resume_ckpt = Path("checkpoints") / f"{cfg.name}_resume.pt"
+    resume_ckpt = Path("checkpoints") / f"{run_name}_resume.pt"
     if resume_ckpt.exists():
         resume = torch.load(resume_ckpt, map_location=device)
         model.load_state_dict(resume["model"])
@@ -156,7 +183,7 @@ def main() -> None:
         )
         if m["audet"] < best_audet:
             best_audet = m["audet"]
-            ckpt = Path("checkpoints") / f"{cfg.name}.pt"
+            ckpt = Path("checkpoints") / f"{run_name}.pt"
             torch.save(
                 {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
                 ckpt,
