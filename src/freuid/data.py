@@ -14,7 +14,8 @@ Label convention matches metrics.py: 1 = fraud, 0 = bona-fide, -1 = unknown (tes
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import logging
@@ -42,6 +43,8 @@ class Sample:
     label: int  # 1 = fraud, 0 = bona-fide, -1 = unknown (test)
     is_digital: bool | None = None
     type: str | None = None  # "COUNTRY/DOCTYPE", e.g. "EGYPT/DL"
+    card_path: Path | None = None   # rectified card PNG from regions cache (use_rectify)
+    face_box: dict | None = field(default=None, repr=False)  # bbox from regions cache (use_face_region)
 
 
 def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
@@ -78,30 +81,47 @@ class FreuidDataset(Dataset):
         split: str = "train",
         transform=None,
         ids: set[str] | None = None,
+        regions_dir: Path | None = None,
     ) -> None:
         self.root = Path(root)
         self.split = split
         self.transform = transform
+        self._regions_dir = regions_dir
         df = load_labels(self.root, split)
         if ids is not None:
             df = df[df["id"].isin(ids)]
-        self.samples: list[Sample] = [
-            Sample(
+        self.samples: list[Sample] = []
+        for r in df.itertuples(index=False):
+            card_path: Path | None = None
+            face_box: dict | None = None
+            if regions_dir is not None:
+                rdir = regions_dir / str(r.id)
+                _cp = rdir / "card.png"
+                _fp = rdir / "face.json"
+                if _cp.exists():
+                    card_path = _cp
+                if _fp.exists():
+                    try:
+                        face_box = json.loads(_fp.read_text())
+                    except Exception:
+                        pass
+            self.samples.append(Sample(
                 id=r.id,
                 path=Path(r.path),
                 label=int(r.label),
                 is_digital=bool(r.is_digital) if pd.notna(r.is_digital) else None,
                 type=r.type if pd.notna(r.type) else None,
-            )
-            for r in df.itertuples(index=False)
-        ]
+                card_path=card_path,
+                face_box=face_box,
+            ))
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int):
         s = self.samples[idx]
-        img = Image.open(s.path).convert("RGB")
+        src = s.card_path if s.card_path is not None else s.path
+        img = Image.open(src).convert("RGB")
         if self.transform is not None:
             img = self.transform(img)
         return img, s.label

@@ -90,10 +90,21 @@ def build_loaders(
     train_tf = build_transforms(size, True, mean, std, augment=augment)
     val_tf = build_transforms(size, False, mean, std)
 
+    # Regions cache: used when extra.use_rectify=True (consistency path with card rectification).
+    _rdir: Path | None = None
+    if cfg.extra.get("use_rectify", False):
+        from freuid.preprocess import regions_dir as _get_rdir
+        _rdir = _get_rdir(cfg.data_dir)
+        if _rdir.exists():
+            print(f"[train] use_rectify=True → loading from {_rdir}")
+        else:
+            print(f"[train] WARNING: use_rectify=True but cache not found at {_rdir}; using raw images")
+            _rdir = None
+
     synth_prob = float(cfg.extra.get("synth_tamper_prob", 0.0))
     if synth_prob > 0.0:
         from freuid.augment import SynthTamperWrapper, recapture_transforms
-        _base_train_ds = FreuidDataset(cfg.data_dir, "train", None, ids=train_ids)
+        _base_train_ds = FreuidDataset(cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir)
         _tamper_tf = recapture_transforms(size, mean, std)
         train_ds = SynthTamperWrapper(
             _base_train_ds,
@@ -109,8 +120,8 @@ def build_loaders(
             f"| donor_pool={len(train_ds._donor_pool)}"
         )
     else:
-        train_ds = FreuidDataset(cfg.data_dir, "train", train_tf, ids=train_ids)
-    val_ds = FreuidDataset(cfg.data_dir, "train", val_tf, ids=val_ids)
+        train_ds = FreuidDataset(cfg.data_dir, "train", train_tf, ids=train_ids, regions_dir=_rdir)
+    val_ds = FreuidDataset(cfg.data_dir, "train", val_tf, ids=val_ids, regions_dir=_rdir)
     pin_memory = torch.cuda.is_available()  # unsupported/no-op on MPS, only helps CUDA
     train_loader = DataLoader(
         train_ds, batch_size=cfg.batch_size, shuffle=True,
@@ -142,7 +153,7 @@ def build_loaders(
     if cfg.extra.get("use_recapture_probe"):
         from freuid.augment import recapture_transforms
         probe_tf = recapture_transforms(size, mean, std)
-        probe_ds = FreuidDataset(cfg.data_dir, "train", probe_tf, ids=val_ids)
+        probe_ds = FreuidDataset(cfg.data_dir, "train", probe_tf, ids=val_ids, regions_dir=_rdir)
         probe_loader = DataLoader(
             probe_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0,
         )

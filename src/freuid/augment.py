@@ -219,8 +219,11 @@ class SynthTamperWrapper(Dataset):
 
         # Pre-load a donor pool of bona-fide images for splice operations.
         # Done once at init so workers share the read-only pool without extra I/O.
+        # Prefer rectified card_path when available (use_rectify path).
         donor_paths: list[Path] = [
-            s.path for s in getattr(base, "samples", []) if s.label == 0
+            s.card_path if s.card_path is not None else s.path
+            for s in getattr(base, "samples", [])
+            if s.label == 0
         ]
         self._rng.shuffle(donor_paths)  # type: ignore[arg-type]
         self._donor_pool: list[np.ndarray] = []
@@ -234,9 +237,9 @@ class SynthTamperWrapper(Dataset):
         return len(self.base)  # type: ignore[arg-type]
 
     def __getitem__(self, idx: int):
-        # Access the raw sample without any transform
         sample = self.base.samples[idx]  # type: ignore[attr-defined]
-        img_pil = Image.open(sample.path).convert("RGB")
+        src = sample.card_path if sample.card_path is not None else sample.path
+        img_pil = Image.open(src).convert("RGB")
         label = sample.label
 
         if label == 0 and self._rng.random() < self.prob:

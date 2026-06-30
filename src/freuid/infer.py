@@ -92,6 +92,7 @@ def predict_scores_tta(
     mean,
     std,
     scales: list[int],
+    regions_dir: Path | None = None,
 ) -> list[tuple[str, float]]:
     """Multi-scale TTA: run inference at each scale, rank-average, return (id, score) pairs.
 
@@ -104,7 +105,7 @@ def predict_scores_tta(
 
     for scale in scales:
         tf = build_transforms(scale, False, mean, std)
-        ds = FreuidDataset(data_dir, "public_test", tf, ids=present_ids)
+        ds = FreuidDataset(data_dir, "public_test", tf, ids=present_ids, regions_dir=regions_dir)
         loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
         if sample_ids is None:
             sample_ids = [s.id for s in ds.samples]
@@ -238,6 +239,17 @@ def main() -> None:
     base_size = data_cfg["image_size"]
     mean, std = data_cfg["mean"], data_cfg["std"]
 
+    # Regions cache: used when extra.use_rectify=True (card-rectification path).
+    _rdir: Path | None = None
+    if cfg.extra.get("use_rectify", False):
+        from freuid.preprocess import regions_dir as _get_rdir
+        _rdir = _get_rdir(cfg.data_dir)
+        if not _rdir.exists():
+            print(f"[infer] WARNING: use_rectify=True but cache not found at {_rdir}; using raw images")
+            _rdir = None
+        else:
+            print(f"[infer] use_rectify=True → loading from {_rdir}")
+
     tta_cfg = cfg.extra.get("tta", False)
     if tta_cfg:
         if isinstance(tta_cfg, list):
@@ -255,11 +267,12 @@ def main() -> None:
             num_workers=cfg.num_workers,
             mean=mean, std=std,
             scales=tta_scales,
+            regions_dir=_rdir,
         )
         id_to_score: dict[str, float] = dict(id_score_pairs)
     else:
         transform = build_transforms(base_size, False, mean, std)
-        ds = FreuidDataset(cfg.data_dir, "public_test", transform, ids=present_ids)
+        ds = FreuidDataset(cfg.data_dir, "public_test", transform, ids=present_ids, regions_dir=_rdir)
         loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
         scores = predict_scores(model, loader, device)
         id_to_score = dict(zip((s.id for s in ds.samples), scores, strict=True))
