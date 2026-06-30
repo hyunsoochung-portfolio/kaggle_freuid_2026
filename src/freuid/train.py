@@ -231,7 +231,12 @@ def main() -> None:
         print(f"[train] probe={len(probe_loader.dataset)} (recapture, seed={cfg.extra.get('recapture_probe_seed', 0)})")
 
     # model_type dispatch: add new model types here (e.g. model_type="consistency")
-    model = build_model(cfg.backbone, cfg.pretrained).to(device)
+    model_type = cfg.extra.get("model_type", "baseline")
+    if model_type == "consistency":
+        from freuid.models import build_consistency_model
+        model = build_consistency_model(cfg).to(device)
+    else:
+        model = build_model(cfg.backbone, cfg.pretrained).to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # Always check init loss before any weight updates.
@@ -242,7 +247,8 @@ def main() -> None:
         print("[sanity] all checks passed — exiting")
         return
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
     # Cosine decay over the run: anneals LR toward 0 by the final epoch. Helps the
     # pretrained RGB backbone settle rather than oscillating at a flat LR.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)

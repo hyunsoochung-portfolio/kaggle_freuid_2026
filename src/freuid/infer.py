@@ -207,7 +207,12 @@ def main() -> None:
     )
 
     # model_type dispatch: add new model types here (e.g. model_type="consistency")
-    model = build_model(cfg.backbone, pretrained=False).to(device)
+    model_type = cfg.extra.get("model_type", "baseline")
+    if model_type == "consistency":
+        from freuid.models import build_consistency_model
+        model = build_consistency_model(cfg).to(device)
+    else:
+        model = build_model(cfg.backbone, pretrained=False).to(device)
     model.load_state_dict(state["model"])
     model.eval()
 

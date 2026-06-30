@@ -1,0 +1,46 @@
+# configs/consistency.yaml
+# S2 — frozen DINOv3 ViT-B/16 backbone + CLS-token linear head.
+# Patch self-consistency and face-region heads come in S3 (backbone frozen throughout).
+#
+# backbone: sentinel only — DINO is not in timm so resolve_data_config falls through
+# to ImageNet stats (0.485/0.456/0.406, 0.229/0.224/0.225), which is correct for DINOv2/v3.
+# extra.backbone_name is what actually gets loaded via torch.hub.
+
+name: consistency_v0
+seed: 42
+data_dir: data
+
+backbone: dinov2_vitb14   # timm sentinel → ImageNet stats fallback (correct for DINO)
+pretrained: true
+image_size: 512
+
+epochs: 20
+batch_size: 16            # smaller: ViT-B forward is heavier than ConvNeXt-Small
+lr: 1.0e-3                # head-only training: can use a larger LR than full-model
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  model_type: consistency
+  backbone_name: dinov3_vitb16   # torch.hub load; falls back to dinov2_vitb14 if unavailable
+
+  # Augmentation: print-and-capture pipeline (no flip)
+  augment: recapture
+
+  # Synthetic tamper: 30% of bona-fide per batch become synthetic positives
+  synth_tamper_prob: 0.3
+
+  # Pairwise soft-AUC term (same weight as S1)
+  auc_loss_weight: 0.1
+
+  # Recapture probe: checkpoint on lowest probe AuDET
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  # TTA at inference: three scales, rank-averaged, no flip
+  tta: true
+
+  missing_id_score: 0.5
