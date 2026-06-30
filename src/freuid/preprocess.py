@@ -254,6 +254,10 @@ def precache_regions(
                 n_skip += 1
                 continue
 
+            if not Path(str(row.path)).exists():
+                n_skip += 1
+                continue
+
             try:
                 bgr = cv2.imread(str(row.path))
                 if bgr is None:
