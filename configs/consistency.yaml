@@ -24,7 +24,7 @@ val_fraction: 0.1
 
 extra:
   model_type: consistency
-  backbone_name: dinov3_vitb16   # torch.hub load; falls back to dinov2_vitb14 if unavailable
+  backbone_name: dinov2_vitb14   # Apache 2.0; DINOv3 is gated — switch when access is resolved
 
   # Augmentation: print-and-capture pipeline (no flip)
   augment: recapture
