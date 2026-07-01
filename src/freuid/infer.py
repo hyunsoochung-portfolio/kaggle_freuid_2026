@@ -31,7 +31,7 @@ from tqdm import tqdm
 
 from freuid.config import Config, load_config
 from freuid.data import FreuidDataset, load_labels
-from freuid.models import build_model
+from freuid.models import build_dct_model, build_model
 from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
@@ -128,7 +128,11 @@ def main() -> None:
 
     # backbone 이름으로 모델 아키텍처만 만들고(pretrained=False),
     # checkpoint에 저장된 가중치로 초기화. 모델이 device(GPU/CPU)에 올라감.
-    model = build_model(cfg.backbone, pretrained=False).to(device)
+    model = (
+        build_dct_model(cfg.backbone, pretrained=False)
+        if cfg.extra.get("use_dct", False)
+        else build_model(cfg.backbone, pretrained=False)
+    ).to(device)
     model.load_state_dict(state["model"]) #checkpoint에 저장된 모델 가중치로 모델 초기화
     model.eval() #평가 모드로 전환. 드롭아웃/배치정규화 등 학습 전용 동작 끔.
 
