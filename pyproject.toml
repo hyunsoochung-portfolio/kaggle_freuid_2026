@@ -9,7 +9,9 @@ dependencies = [
     "torch>=2.2",
     "torchvision>=0.17",
     "timm>=1.0",
-    "numpy>=1.26",
+    # <2: torchvision's PIL adjust_hue (ColorJitter) does `np.uint8(negative)`, which raises
+    # OverflowError on numpy 2.x. The cloud torch image (torchvision 0.18) hits this; pin until upgraded.
+    "numpy>=1.26,<2",
     "pandas>=2.2",
     "pillow>=10.0",
     "scikit-learn>=1.4",
