@@ -3,7 +3,7 @@ name = "freuid"
 version = "0.1.0"
 description = "FREUID Challenge 2026 (IJCAI-ECAI) — identity document fraud detection"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
     "torch>=2.2",
@@ -16,7 +16,9 @@ dependencies = [
     "pyyaml>=6.0",
     "tqdm>=4.66",
     "albumentations>=1.4",
-    "kaggle>=1.6",   # 1.6 floor so it installs on Python 3.10 cloud boxes (kaggle 2.x needs 3.11+)
+    # kaggle 2.x needs Python 3.11+; 3.10 cloud boxes (e.g. VESSL torch image) get 1.x. Both auth via kaggle.json.
+    "kaggle>=2.2; python_version >= '3.11'",
+    "kaggle>=1.6,<2; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -37,7 +39,7 @@ packages = ["src/freuid"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
