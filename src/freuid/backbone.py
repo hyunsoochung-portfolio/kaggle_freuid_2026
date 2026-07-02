@@ -55,12 +55,16 @@ class _FeatureWrapper(nn.Module):
         patch_size: int,
         embed_dim: int,
         backend: str = "hub",
+        num_register_tokens: int = 0,
     ) -> None:
         super().__init__()
         self._raw = raw
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self._backend = backend  # "hub" | "transformers"
+        # DINOv3's HF model interleaves [CLS, register_1..N, patch_1..HW] in
+        # last_hidden_state; the hub backend's x_norm_patchtokens already excludes these.
+        self._num_register_tokens = num_register_tokens
 
     @torch.no_grad()
     def forward_features(self, imgs: torch.Tensor) -> dict:
@@ -78,9 +82,10 @@ class _FeatureWrapper(nn.Module):
         with amp_ctx:
             if self._backend == "transformers":
                 out = self._raw(pixel_values=imgs)
-                # last_hidden_state: (B, 1+N, D); position 0 = CLS, 1: = patches
+                # last_hidden_state: (B, 1+R+N, D); 0 = CLS, 1:1+R = registers, rest = patches
+                patch_start = 1 + self._num_register_tokens
                 cls = out.last_hidden_state[:, 0, :].float()
-                patch = out.last_hidden_state[:, 1:, :].float()
+                patch = out.last_hidden_state[:, patch_start:, :].float()
             else:
                 raw_out = self._raw.forward_features(imgs)
                 cls = raw_out["x_norm_clstoken"].float()
@@ -169,7 +174,13 @@ def load_backbone(backbone_name: str) -> _FeatureWrapper:
             patch_size = ps[0] if isinstance(ps, (tuple, list)) else ps
 
     embed_dim = _EMBED_DIM.get(backbone_name, getattr(raw, "embed_dim", 768))
-    return _FeatureWrapper(raw, int(patch_size), int(embed_dim), backend=backend)
+    num_register_tokens = 0
+    if backend == "transformers":
+        num_register_tokens = int(getattr(getattr(raw, "config", None), "num_register_tokens", 0))
+    return _FeatureWrapper(
+        raw, int(patch_size), int(embed_dim), backend=backend,
+        num_register_tokens=num_register_tokens,
+    )
 
 
 def embed_dim_for(backbone_name: str) -> int:
