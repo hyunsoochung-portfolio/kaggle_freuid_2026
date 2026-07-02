@@ -28,6 +28,7 @@ Constant-0.5 baseline FREUID ≈ 1.0 (g_apcer collapses to 0 → harmonic mean =
 | baseline_v0    | tf_efficientnetv2_s.in21k           | 15             | 0.000000                | —         | 0.27106          | S0 submitted                                                         |
 | baseline_v1    | convnext_small.fb_in22k_ft_in1k     | 10 (best ep9)  | 0.000039                | 0.0000    | 0.18129          | synth p=0.3, auc_w=0.1, TTA 3-scale; submitted                       |
 | consistency_v0 | dinov2_vitb14 (frozen) + GlobalHead | 20 (best ep20) | 0.061290                | 0.0280    | 0.30743          | 149K trainable, synth p=0.3, auc_w=0.1, TTA [448,518,588]; submitted |
+| consistency_v1 | dinov3_vitb16 (frozen) + Global+Patch+Face fusion | 20 (best ep18) | 0.117463 | 0.1136 | 0.61753 | 10.27M trainable, synth p=0.3, auc_w=0.1, TTA [448,512,528]; submitted -- regression vs v0, see docs/problem.md |
 
 ---
 
@@ -50,6 +51,23 @@ Constant-0.5 baseline FREUID ≈ 1.0 (g_apcer collapses to 0 → harmonic mean =
 > **Diagnosis**: CLS-only GlobalHead gives up the CNN baseline on LB. The DINOv2 global feature alone
 > is not enough — the analog-robustness gain needs patch self-consistency (S3), not just a better
 > frozen feature extractor. probe_AuDET was already a warning (0.061 vs 0.000039 for baseline_v1).
+
+## S3 gate checklist — NOT CLEARED ✗
+
+- [x] consistency_v1 smoke: all 3 heads on, backbone frozen (10.27M trainable / 85.66M frozen), init BCE=0.6931, single-batch overfit=0.0037 ✓
+- [x] consistency_v1 full train: probe_AuDET=0.1175 (best ep18), val_AuDET=0.1136
+- [x] TTA integrity passed (rows=142818, zeros=0, range≈[0.0, 1.0])
+- [ ] consistency_v1 probe_AuDET < consistency_v0 probe_AuDET (0.1175 > 0.0613 — **regressed**)
+- [ ] consistency_v1 public LB FREUID < consistency_v0 public LB FREUID (0.618 > 0.307 — **regressed**)
+- [ ] ablation gate: fusion_all probe_AuDET <= best single head (toy-scale sweep: global_only beat fusion_all, patch_only, face_only — **not cleared**)
+
+> **Diagnosis**: adding PatchConsistencyHead + FaceRegionHead made every local and public signal
+> worse, not better, confirming the toy-scale ablation warning. Root-caused in
+> [docs/problem.md](docs/problem.md): naive concat fusion gives the two new heads no "stay a
+> no-op until useful" guarantee past init (PatchConsistencyHead is active on 100% of samples,
+> ~65x consistency_v0's entire head, and likely hasn't converged in 20 head-only epochs), plus a
+> confirmed missing-LayerNorm scale bug in FaceRegionHead's output. Proposed fix: gated
+> (LayerScale-style) fusion + the LayerNorm fix, before re-attempting S3.
 
 ---
 

@@ -91,6 +91,7 @@ class FaceRegionHead(nn.Module):
         self.fc1 = nn.Linear(embed_dim + 1, hidden)
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden, hidden)
+        self.out_norm = nn.LayerNorm(hidden)
         self.out_dim = hidden
 
     def forward(
@@ -125,6 +126,7 @@ class FaceRegionHead(nn.Module):
         diff = self.norm(inside_mean - outside_mean)
         feat = torch.cat([diff, cos], dim=-1)             # (B, D+1)
         emb = self.fc2(self.act(self.fc1(feat)))          # (B, hidden)
+        emb = self.out_norm(emb)                           # match scale of global/patch branches
         return emb * valid                                 # zero out invalid/fallback samples
 
 
@@ -181,6 +183,19 @@ class ConsistencyHead(nn.Module):
             self.face_head = FaceRegionHead(embed_dim, hidden=face_hidden)
             fusion_in += self.face_head.out_dim
 
+        # LayerScale-style gates on the new, unproven branches only (not global): initialized
+        # near-zero so the model starts close to global-only behavior and "opens" each pathway
+        # only once it earns its keep, instead of contaminating the shared fusion layer's
+        # gradients from step 1. Small nonzero init (not exact 0) so the branch still receives
+        # gradient through the gate at init -- see docs/problem.md finding #1.
+        self.patch_gate: nn.Parameter | None = None
+        if self.patch_head is not None:
+            self.patch_gate = nn.Parameter(torch.full((self.patch_head.out_dim,), 1e-3))
+
+        self.face_gate: nn.Parameter | None = None
+        if self.face_head is not None:
+            self.face_gate = nn.Parameter(torch.full((self.face_head.out_dim,), 1e-3))
+
         self.fusion = FusionMLP(fusion_in, hidden=fusion_hidden, dropout=fusion_dropout)
 
     def forward(
@@ -192,9 +207,9 @@ class ConsistencyHead(nn.Module):
     ) -> torch.Tensor:
         parts = [self.global_norm(cls)]
         if self.patch_head is not None:
-            parts.append(self.patch_head(patch_tokens))
+            parts.append(self.patch_head(patch_tokens) * self.patch_gate)
         if self.face_head is not None:
-            parts.append(self.face_head(patch_tokens, grid_hw, face_meta))
+            parts.append(self.face_head(patch_tokens, grid_hw, face_meta) * self.face_gate)
         fused = torch.cat(parts, dim=-1)
         return self.fusion(fused)
 
