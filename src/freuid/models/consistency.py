@@ -2,6 +2,20 @@
 freuid.consistency_model so the existing models/__init__.py import path is unchanged.
 """
 
-from freuid.consistency_model import ConsistencyNet, build_consistency_model  # noqa: F401
+from freuid.consistency_model import (  # noqa: F401
+    ConsistencyHead,
+    ConsistencyNet,
+    FaceRegionHead,
+    FusionMLP,
+    PatchConsistencyHead,
+    build_consistency_model,
+)
 
-__all__ = ["ConsistencyNet", "build_consistency_model"]
+__all__ = [
+    "ConsistencyHead",
+    "ConsistencyNet",
+    "FaceRegionHead",
+    "FusionMLP",
+    "PatchConsistencyHead",
+    "build_consistency_model",
+]

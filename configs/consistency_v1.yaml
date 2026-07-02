@@ -1,0 +1,65 @@
+# configs/consistency_v1.yaml
+# S3 — consistency_v0's frozen backbone + GlobalHead, plus patch self-consistency
+# (TransformerEncoder outlier query) and face-region consistency (SCRFD-cached box vs.
+# rest-of-card contrast), fused into a single logit. Backbone frozen throughout.
+#
+# Requires the regions cache precached first:
+#   python -m freuid.preprocess --config configs/consistency_v1.yaml --splits train public_test
+#
+# backbone: sentinel only -- DINO is not in timm so resolve_data_config falls through
+# to ImageNet stats (0.485/0.456/0.406, 0.229/0.224/0.225), which is correct for DINOv2/v3.
+# extra.backbone_name is what actually gets loaded via torch.hub.
+
+name: consistency_v1
+seed: 42
+data_dir: data
+
+backbone: dinov3_vitb16   # timm sentinel → ImageNet stats fallback (correct for DINO)
+pretrained: true
+image_size: 512           # must be divisible by patch_size; 512 = 16x32 (DINOv3 patch_size=16)
+
+epochs: 20
+batch_size: 16            # smaller: ViT-B forward + patch-token TransformerEncoder is heavy
+lr: 1.0e-3                # head-only training: can use a larger LR than full-model
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  model_type: consistency
+  backbone_name: dinov3_vitb16   # gated; HF_TOKEN required + license accepted on HF
+
+  # Card rectification (FastSAM) -- required for face_region head's coord space.
+  use_rectify: true
+
+  # S3 heads -- each independently toggleable for ablation.
+  use_patch_consistency: true
+  patch_consistency_layers: 2
+  patch_consistency_heads: 8
+  patch_consistency_dropout: 0.1
+
+  use_face_region: true
+  face_region_hidden: 128
+
+  fusion_dropout: 0.3
+
+  # Augmentation: print-and-capture pipeline (no flip)
+  augment: recapture
+
+  # Synthetic tamper: 30% of bona-fide per batch become synthetic positives
+  synth_tamper_prob: 0.3
+
+  # Pairwise soft-AUC term (same weight as S1/S2)
+  auc_loss_weight: 0.1
+
+  # Recapture probe: checkpoint on lowest probe AuDET
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  # TTA at inference: three scales, rank-averaged, no flip.
+  # Must all be multiples of patch_size=16 for DINOv3.  448=16x28, 512=16x32, 528=16x33.
+  tta: [448, 512, 528]
+
+  missing_id_score: 0.5

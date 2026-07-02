@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, lodo_split, stratified_split
+from freuid.data import FreuidDataset, lodo_split, stratified_split, unpack_batch
 from freuid.loss import combined_loss
 from freuid.metrics import evaluate
 from freuid.models import build_model
@@ -39,13 +39,15 @@ def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: floa
     is_train = optimizer is not None
     model.train(is_train)
     total_loss, n_seen, all_scores, all_labels = 0.0, 0, [], []
-    for imgs, labels in tqdm(loader, leave=False):
+    for batch in tqdm(loader, leave=False):
+        imgs, labels, face_meta = unpack_batch(batch)
         imgs = imgs.to(device)
         labels_dev = labels.to(device)
+        face_meta_dev = face_meta.to(device) if face_meta is not None else None
         # eval 모드에서는 불필요한 그래디언트 계산을 끄는 컨텍스트 매니저
         with torch.set_grad_enabled(is_train):
             # 모델 forward() 호출. imgs [B, 3, H, W] -> logits [B, 1] (B=batch_size)
-            logits = model(imgs)
+            logits = model(imgs, face_meta_dev) if face_meta_dev is not None else model(imgs)
             # BCE + optional pairwise AUC term (train only; val always uses plain BCE)
             _aw = auc_weight if is_train else 0.0
             loss = combined_loss(logits, labels_dev, criterion, _aw)
@@ -101,10 +103,18 @@ def build_loaders(
             print(f"[train] WARNING: use_rectify=True but cache not found at {_rdir}; using raw images")
             _rdir = None
 
+    # Face-region head needs (id, valid) face boxes alongside each batch. Only the
+    # consistency path knows how to consume the extra tensor, so gate on model_type too.
+    model_type = cfg.extra.get("model_type", "baseline")
+    return_face_meta = model_type == "consistency" and bool(cfg.extra.get("use_face_region", False))
+
     synth_prob = float(cfg.extra.get("synth_tamper_prob", 0.0))
     if synth_prob > 0.0:
         from freuid.augment import SynthTamperWrapper, recapture_transforms
-        _base_train_ds = FreuidDataset(cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir)
+        _base_train_ds = FreuidDataset(
+            cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir,
+            return_face_meta=return_face_meta,
+        )
         _tamper_tf = recapture_transforms(size, mean, std)
         train_ds = SynthTamperWrapper(
             _base_train_ds,
@@ -120,8 +130,14 @@ def build_loaders(
             f"| donor_pool={len(train_ds._donor_pool)}"
         )
     else:
-        train_ds = FreuidDataset(cfg.data_dir, "train", train_tf, ids=train_ids, regions_dir=_rdir)
-    val_ds = FreuidDataset(cfg.data_dir, "train", val_tf, ids=val_ids, regions_dir=_rdir)
+        train_ds = FreuidDataset(
+            cfg.data_dir, "train", train_tf, ids=train_ids, regions_dir=_rdir,
+            return_face_meta=return_face_meta,
+        )
+    val_ds = FreuidDataset(
+        cfg.data_dir, "train", val_tf, ids=val_ids, regions_dir=_rdir,
+        return_face_meta=return_face_meta,
+    )
     pin_memory = torch.cuda.is_available()  # unsupported/no-op on MPS, only helps CUDA
     train_loader = DataLoader(
         train_ds, batch_size=cfg.batch_size, shuffle=True,
@@ -153,7 +169,10 @@ def build_loaders(
     if cfg.extra.get("use_recapture_probe"):
         from freuid.augment import recapture_transforms
         probe_tf = recapture_transforms(size, mean, std)
-        probe_ds = FreuidDataset(cfg.data_dir, "train", probe_tf, ids=val_ids, regions_dir=_rdir)
+        probe_ds = FreuidDataset(
+            cfg.data_dir, "train", probe_tf, ids=val_ids, regions_dir=_rdir,
+            return_face_meta=return_face_meta,
+        )
         probe_loader = DataLoader(
             probe_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0,
         )
@@ -179,9 +198,10 @@ def _check_init_loss(model, loader, device, criterion, tol: float = 0.3) -> None
     or the loss function is mis-wired.
     """
     model.eval()
-    imgs, labels = next(iter(loader))
+    imgs, labels, face_meta = unpack_batch(next(iter(loader)))
     with torch.no_grad():
-        logits = model(imgs.to(device))
+        imgs = imgs.to(device)
+        logits = model(imgs, face_meta.to(device)) if face_meta is not None else model(imgs)
         loss = criterion(logits, labels.float().unsqueeze(1).to(device)).item()
     model.train()
     expected = math.log(2)  # ≈ 0.693
@@ -201,16 +221,21 @@ def _sanity_overfit(model, loader, device, criterion, steps: int = 100, target: 
     """
     import copy
     m = copy.deepcopy(model)
-    imgs, labels = next(iter(loader))
+    imgs, labels, face_meta = unpack_batch(next(iter(loader)))
     imgs = imgs.to(device)
+    face_meta = face_meta.to(device) if face_meta is not None else None
     targets = labels.float().unsqueeze(1).to(device)
     opt = torch.optim.SGD(m.parameters(), lr=0.1)
     m.train()
+
+    def _forward():
+        return m(imgs, face_meta) if face_meta is not None else m(imgs)
+
     for _ in range(steps):
         opt.zero_grad()
-        criterion(m(imgs), targets).backward()
+        criterion(_forward(), targets).backward()
         opt.step()
-    final = criterion(m(imgs), targets).item()
+    final = criterion(_forward(), targets).item()
     assert final < target, (
         f"sanity overfit: loss={final:.4f} after {steps} steps (target <{target}). "
         "Check: gradient flow not blocked, model has enough capacity for one batch."

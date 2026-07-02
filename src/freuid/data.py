@@ -22,11 +22,17 @@ import logging
 
 import numpy as np
 import pandas as pd
+import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
+
+# face_meta tensor layout: [x1_frac, y1_frac, x2_frac, y2_frac, valid] -- must match
+# freuid.consistency_model.FACE_META_DIM. Kept as a plain constant here (rather than an
+# import) so the data layer doesn't depend on the model layer.
+FACE_META_DIM = 5
 
 # split -> (image subdir relative to data root, labels/ids csv)
 SPLITS: dict[str, tuple[str, str]] = {
@@ -69,8 +75,41 @@ def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
 #train/val/test splits, and the path column is used to load images. 
 
 
+def unpack_batch(batch):
+    """(imgs, labels) or (imgs, labels, face_meta) -> (imgs, labels, face_meta_or_None).
+
+    Lets a single loop body (``run_epoch``, sanity checks, inference) handle loaders
+    built with or without ``return_face_meta`` without branching on config everywhere.
+    """
+    if len(batch) == 3:
+        return batch[0], batch[1], batch[2]
+    imgs, labels = batch
+    return imgs, labels, None
+
+
+def face_meta_tensor(sample: "Sample", img_size: tuple[int, int]) -> torch.Tensor:
+    """Face-box fractions + validity flag for the FaceRegionHead: [x1,y1,x2,y2,valid].
+
+    ``img_size`` is the (W, H) of the image actually opened for this sample (the
+    rectified card when ``card_path`` is set) -- the space the cached face box is in.
+    Returns an all-zero (invalid) tensor when there's no cached box, or when the box
+    is the center-square fallback (SCRFD ``score`` == 0, i.e. no real detection).
+    """
+    if sample.card_path is None or sample.face_box is None:
+        return torch.zeros(FACE_META_DIM, dtype=torch.float32)
+    fb = sample.face_box
+    if float(fb.get("score", 0.0)) <= 0.0:
+        return torch.zeros(FACE_META_DIM, dtype=torch.float32)
+    w, h = img_size
+    return torch.tensor(
+        [fb["x1"] / w, fb["y1"] / h, fb["x2"] / w, fb["y2"] / h, 1.0],
+        dtype=torch.float32,
+    )
+
+
 class FreuidDataset(Dataset):
-    """Image dataset yielding (transformed_image, label).
+    """Image dataset yielding (transformed_image, label), or (transformed_image, label,
+    face_meta) when ``return_face_meta=True`` (see ``face_meta_tensor``).
 
     Optionally restrict to a subset of ids (for train/val splits) via ``ids``.
     """
@@ -82,11 +121,13 @@ class FreuidDataset(Dataset):
         transform=None,
         ids: set[str] | None = None,
         regions_dir: Path | None = None,
+        return_face_meta: bool = False,
     ) -> None:
         self.root = Path(root)
         self.split = split
         self.transform = transform
         self._regions_dir = regions_dir
+        self._return_face_meta = return_face_meta
         df = load_labels(self.root, split)
         if ids is not None:
             df = df[df["id"].isin(ids)]
@@ -122,8 +163,11 @@ class FreuidDataset(Dataset):
         s = self.samples[idx]
         src = s.card_path if s.card_path is not None else s.path
         img = Image.open(src).convert("RGB")
+        img_size = img.size  # (W, H) before transform -- the space face_box coords are in
         if self.transform is not None:
             img = self.transform(img)
+        if self._return_face_meta:
+            return img, s.label, face_meta_tensor(s, img_size)
         return img, s.label
 
     # __getitem__ / __len__ 은 파이썬의 "정해진 이름"(특수 메서드)이라, 이것만 구현하면

@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, load_labels
+from freuid.data import FreuidDataset, load_labels, unpack_batch
 from freuid.models import build_model
 from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
@@ -44,8 +44,10 @@ _MISSING_FALLBACK = 0.5  # module-level fallback; overridden by extra.missing_id
 def predict_scores(model, loader, device) -> list[float]:
     """Fraud scores in dataset order (loader must be shuffle=False)."""
     scores: list[float] = []
-    for imgs, _ in tqdm(loader, leave=False):
-        logits = model(imgs.to(device))
+    for batch in tqdm(loader, leave=False):
+        imgs, _, face_meta = unpack_batch(batch)
+        imgs = imgs.to(device)
+        logits = model(imgs, face_meta.to(device)) if face_meta is not None else model(imgs)
         scores.extend(torch.sigmoid(logits).squeeze(1).cpu().tolist())
     return scores
 
@@ -93,6 +95,7 @@ def predict_scores_tta(
     std,
     scales: list[int],
     regions_dir: Path | None = None,
+    return_face_meta: bool = False,
 ) -> list[tuple[str, float]]:
     """Multi-scale TTA: run inference at each scale, rank-average, return (id, score) pairs.
 
@@ -105,7 +108,10 @@ def predict_scores_tta(
 
     for scale in scales:
         tf = build_transforms(scale, False, mean, std)
-        ds = FreuidDataset(data_dir, "public_test", tf, ids=present_ids, regions_dir=regions_dir)
+        ds = FreuidDataset(
+            data_dir, "public_test", tf, ids=present_ids, regions_dir=regions_dir,
+            return_face_meta=return_face_meta,
+        )
         loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
         if sample_ids is None:
             sample_ids = [s.id for s in ds.samples]
@@ -250,6 +256,8 @@ def main() -> None:
         else:
             print(f"[infer] use_rectify=True → loading from {_rdir}")
 
+    return_face_meta = model_type == "consistency" and bool(cfg.extra.get("use_face_region", False))
+
     tta_cfg = cfg.extra.get("tta", False)
     if tta_cfg:
         if isinstance(tta_cfg, list):
@@ -268,11 +276,15 @@ def main() -> None:
             mean=mean, std=std,
             scales=tta_scales,
             regions_dir=_rdir,
+            return_face_meta=return_face_meta,
         )
         id_to_score: dict[str, float] = dict(id_score_pairs)
     else:
         transform = build_transforms(base_size, False, mean, std)
-        ds = FreuidDataset(cfg.data_dir, "public_test", transform, ids=present_ids, regions_dir=_rdir)
+        ds = FreuidDataset(
+            cfg.data_dir, "public_test", transform, ids=present_ids, regions_dir=_rdir,
+            return_face_meta=return_face_meta,
+        )
         loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
         scores = predict_scores(model, loader, device)
         id_to_score = dict(zip((s.id for s in ds.samples), scores, strict=True))

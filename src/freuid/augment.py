@@ -9,10 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image, ImageFilter
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import Dataset
+
+from freuid.data import FACE_META_DIM, face_meta_tensor
 
 
 class _AlbumentationsTransform:
@@ -216,6 +219,7 @@ class SynthTamperWrapper(Dataset):
         self.tamper_tf = tamper_transform
         self.prob = prob
         self._rng = np.random.default_rng(seed)
+        self._return_face_meta = getattr(base, "_return_face_meta", False)
 
         # Pre-load a donor pool of bona-fide images for splice operations.
         # Done once at init so workers share the read-only pool without extra I/O.
@@ -240,6 +244,7 @@ class SynthTamperWrapper(Dataset):
         sample = self.base.samples[idx]  # type: ignore[attr-defined]
         src = sample.card_path if sample.card_path is not None else sample.path
         img_pil = Image.open(src).convert("RGB")
+        img_size = img_pil.size  # (W, H) before any transform -- face_box coord space
         label = sample.label
 
         if label == 0 and self._rng.random() < self.prob:
@@ -249,8 +254,14 @@ class SynthTamperWrapper(Dataset):
                 donor = self._donor_pool[int(self._rng.integers(len(self._donor_pool)))]
             tampered, _ = synth_tamper(arr, self._rng, donor)
             img_out = self.tamper_tf(Image.fromarray(tampered))
+            if self._return_face_meta:
+                # a tampered sample no longer matches the cached face box's provenance
+                # (it's a synthetic edit), so face_meta is reported invalid, not stale.
+                return img_out, 1, torch.zeros(FACE_META_DIM, dtype=torch.float32)
             return img_out, 1
 
         if self.clean_tf is not None:
             img_pil = self.clean_tf(img_pil)
+        if self._return_face_meta:
+            return img_pil, label, face_meta_tensor(sample, img_size)
         return img_pil, label
