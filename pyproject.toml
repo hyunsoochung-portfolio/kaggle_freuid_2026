@@ -16,7 +16,7 @@ dependencies = [
     "pyyaml>=6.0",
     "tqdm>=4.66",
     "albumentations>=1.4",
-    "kaggle>=2.2",
+    "kaggle>=1.6",   # 1.6 floor so it installs on Python 3.10 cloud boxes (kaggle 2.x needs 3.11+)
 ]
 
 [project.optional-dependencies]

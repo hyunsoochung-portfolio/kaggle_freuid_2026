@@ -329,7 +329,7 @@ track = [
 [package.metadata]
 requires-dist = [
     { name = "albumentations", specifier = ">=1.4" },
-    { name = "kaggle", specifier = ">=2.2" },
+    { name = "kaggle", specifier = ">=1.6" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pillow", specifier = ">=10.0" },
