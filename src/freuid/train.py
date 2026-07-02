@@ -147,7 +147,7 @@ def main() -> None:
     print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
 
     model = (
-        build_dct_model(cfg.backbone, cfg.pretrained)
+        build_dct_model(cfg.backbone, cfg.pretrained, mean=data_cfg["mean"], std=data_cfg["std"])
         if cfg.extra.get("use_dct", False)
         else build_model(cfg.backbone, cfg.pretrained)
     ).to(device)

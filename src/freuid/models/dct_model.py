@@ -91,9 +91,10 @@ class DCTStream(nn.Module):
 # 듀얼 스트림 모델
 # ---------------------------------------------------------------------------
 
-# ImageNet 정규화 파라미터 (transforms.py와 동일)
-_IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-_IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+# ImageNet 정규화 파라미터는 외부에서 주입받음 (backbone마다 다를 수 있음)
+# ViT: (0.5, 0.5, 0.5) / EfficientNet: (0.485, 0.456, 0.406)
+_DEFAULT_MEAN = (0.5, 0.5, 0.5)
+_DEFAULT_STD  = (0.5, 0.5, 0.5)
 
 class DualStreamFraudDetector(nn.Module):
     """RGB stream + DCT stream -> fusion -> fraud logit.
@@ -111,14 +112,24 @@ class DualStreamFraudDetector(nn.Module):
         pretrained: bool = True,
         dct_dim: int = 256,
         dropout: float = 0.3,
+        mean: tuple = _DEFAULT_MEAN,
+        std: tuple  = _DEFAULT_STD,
     ):
         super().__init__()
 
         # --- RGB stream ---
         self.rgb_backbone = timm.create_model(
-            backbone, pretrained=pretrained, num_classes=0  # feature만 추출
+            backbone, pretrained=pretrained, num_classes=0
         )
-        rgb_dim = self.rgb_backbone.num_features  # ViT-B: 768, EfficientNet-S: 1280
+        rgb_dim = self.rgb_backbone.num_features
+
+        # --- DCT 역변환용 mean/std 등록 (backbone과 동일한 값 사용) ---
+        self.register_buffer(
+            "dct_mean", torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1)
+        )
+        self.register_buffer(
+            "dct_std",  torch.tensor(std,  dtype=torch.float32).view(1, 3, 1, 1)
+        )
 
         # --- DCT stream ---
         self.block_dct = BlockDCT(block_size=8)
@@ -136,21 +147,17 @@ class DualStreamFraudDetector(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # RGB stream: 정규화된 값 그대로 (ViT가 원래 이렇게 씨)
-        rgb_feat = self.rgb_backbone(x)           # [B, rgb_dim]
+        # RGB stream
+        rgb_feat = self.rgb_backbone(x)                          # [B, rgb_dim]
 
         # DCT stream: 정규화 역변환 후 0~255로 복원
-        # DCT는 픽셀값 0~255 기준으로 설계된 변환이라
-        # 정규화된 -2~+2 값을 그대로 넣으면 계수가 의미없는 값이 됨
-        mean = _IMAGENET_MEAN.to(x.device)
-        std  = _IMAGENET_STD.to(x.device)
-        x_pixel = (x * std + mean) * 255.0          # [-2~+2] -> [0~255]
-        x_pixel = x_pixel.clamp(0.0, 255.0)         # 범위 보증
-        dct_coef = self.block_dct(x_pixel)           # [B, 192, H//8, W//8]
-        dct_feat = self.dct_stream(dct_coef)         # [B, dct_dim]
+        x_pixel = (x * self.dct_std + self.dct_mean) * 255.0    # [0~255]
+        x_pixel = x_pixel.clamp(0.0, 255.0)
+        dct_coef = self.block_dct(x_pixel)                       # [B, 192, H//8, W//8]
+        dct_feat = self.dct_stream(dct_coef)                     # [B, dct_dim]
 
-        fused = torch.cat([rgb_feat, dct_feat], dim=1)  # [B, rgb_dim+dct_dim]
-        return self.head(fused)                          # [B, 1]
+        fused = torch.cat([rgb_feat, dct_feat], dim=1)           # [B, rgb_dim+dct_dim]
+        return self.head(fused)                                   # [B, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -162,5 +169,7 @@ def build_dct_model(
     pretrained: bool = True,
     dct_dim: int = 256,
     dropout: float = 0.3,
+    mean: tuple = _DEFAULT_MEAN,
+    std: tuple  = _DEFAULT_STD,
 ) -> nn.Module:
-    return DualStreamFraudDetector(backbone, pretrained, dct_dim, dropout)
+    return DualStreamFraudDetector(backbone, pretrained, dct_dim, dropout, mean, std)
