@@ -25,7 +25,13 @@ echo "Downloading '${COMP}' into ${DEST} ..."
 echo "Unzipping ..."
 for z in "$DEST"/*.zip; do
     [ -e "$z" ] || continue
-    unzip -o -q "$z" -d "$DEST" && rm -f "$z"
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -o -q "$z" -d "$DEST" && rm -f "$z"
+    else
+        # some cloud images ship without unzip; fall back to Python's zipfile
+        python -c "import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$z" "$DEST" \
+            && rm -f "$z"
+    fi
 done
 
 echo "Done. Contents:"
