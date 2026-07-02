@@ -101,6 +101,11 @@ def _load_hub(repo: str, model_name: str) -> nn.Module:
 
 def _load_dinov3_from_hf(hf_repo: str) -> tuple[nn.Module, str]:
     """Load DINOv3 from HuggingFace (gated — requires HF_TOKEN + license accept)."""
+    import os
+
+    from freuid.utils import load_dotenv
+
+    load_dotenv()  # picks up HF_TOKEN from .env if not already set in the environment
     print(f"[backbone] torch.hub failed; trying HuggingFace ({hf_repo})...")
     try:
         from transformers import AutoModel
@@ -109,7 +114,7 @@ def _load_dinov3_from_hf(hf_repo: str) -> tuple[nn.Module, str]:
             "transformers not installed. Run: pip install transformers"
         ) from e
     try:
-        model = AutoModel.from_pretrained(hf_repo)
+        model = AutoModel.from_pretrained(hf_repo, token=os.environ.get("HF_TOKEN"))
     except Exception as e:
         raise RuntimeError(
             f"Could not load dinov3_vitb16 from HuggingFace ({hf_repo}): {e}\n"

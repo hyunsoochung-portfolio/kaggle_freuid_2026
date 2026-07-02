@@ -234,6 +234,7 @@ wandb/
 kaggle.json
 .env
 .env.*
+!.env.example
 *.pem
 
 # smoke-test mini dataset (not for VCS)
