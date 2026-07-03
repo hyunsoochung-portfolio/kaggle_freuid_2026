@@ -1,0 +1,14 @@
+name: yuri_fast_colab
+seed: 42
+data_dir: data
+image_size: 384
+val_fraction: 0.1
+backbone: tf_efficientnetv2_s.in21k
+pretrained: true
+epochs: 4
+batch_size: 32
+lr: 0.0003
+weight_decay: 0.0001
+num_workers: 8
+deterministic: false
+use_amp: true

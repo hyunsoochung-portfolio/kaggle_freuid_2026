@@ -20,7 +20,12 @@ def pick_device():
 
 
 def seed_everything(seed: int = 42, deterministic: bool = True) -> None:
-    """Seed python / numpy / torch so a config reproduces a ranked result."""
+    """Seed python / numpy / torch so a config reproduces a ranked result.
+
+    deterministic=True trades speed for bit-exact repro (cudnn.benchmark off).
+    Use deterministic=False for fast iteration (smoke tests, hparam search);
+    switch back to True for the run you'll actually submit / report.
+    """
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -29,8 +34,7 @@ def seed_everything(seed: int = 42, deterministic: bool = True) -> None:
 
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        if deterministic:
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = deterministic
+        torch.backends.cudnn.benchmark = not deterministic
     except ImportError:
         pass
