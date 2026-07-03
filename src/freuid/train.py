@@ -279,6 +279,17 @@ def main() -> None:
         model = build_consistency_model(cfg).to(device)
     else:
         model = build_model(cfg.backbone, cfg.pretrained).to(device)
+        # Fine-tuning knobs (baseline/ViT path only; frozen consistency path untouched).
+        train_last_k = cfg.extra.get("train_last_k_blocks")
+        if train_last_k is not None:
+            from freuid.optim import freeze_all_but_last_k_blocks
+            freeze_all_but_last_k_blocks(model, int(train_last_k))
+        if cfg.extra.get("grad_checkpointing", False):
+            if hasattr(model, "set_grad_checkpointing"):
+                model.set_grad_checkpointing(True)
+                print("[train] gradient checkpointing enabled")
+            else:
+                print(f"[train] WARNING: grad_checkpointing=True but {cfg.backbone} has no set_grad_checkpointing")
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # Always check init loss before any weight updates.
@@ -289,27 +300,44 @@ def main() -> None:
         print("[sanity] all checks passed — exiting")
         return
 
-    trainable = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    # Cosine decay over the run: anneals LR toward 0 by the final epoch. Helps the
-    # pretrained RGB backbone settle rather than oscillating at a flat LR.
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
+    llrd_cfg = cfg.extra.get("llrd") or {}
+    if llrd_cfg.get("enabled", False):
+        from freuid.optim import build_llrd_param_groups, build_warmup_cosine_scheduler
+        param_groups = build_llrd_param_groups(
+            model, base_lr=cfg.lr, weight_decay=cfg.weight_decay,
+            decay=float(llrd_cfg.get("decay", 0.7)),
+        )
+        optimizer = torch.optim.AdamW(param_groups)
+        scheduler = build_warmup_cosine_scheduler(
+            optimizer, cfg.epochs, warmup_epochs=int(llrd_cfg.get("warmup_epochs", 2)),
+        )
+    else:
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
+        # Cosine decay over the run: anneals LR toward 0 by the final epoch. Helps the
+        # pretrained RGB backbone settle rather than oscillating at a flat LR.
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
 
     auc_weight = float(cfg.extra.get("auc_loss_weight", 0.0))
     if auc_weight > 0.0:
         print(f"[train] auc_loss_weight={auc_weight} (pairwise soft-AUC term active)")
 
     # Checkpoint criterion: "probe_audet" (recapture compass) or "audet" (in-domain).
+    # Ties on the primary metric are broken by the matching APCER@1%BPCER (secondary
+    # competition metric) so two epochs with identical AuDET don't checkpoint arbitrarily.
     ckpt_key = cfg.extra.get("checkpoint_metric", "audet")
+    tie_key = {"probe_audet": "probe_apcer_at_1pct_bpcer", "audet": "apcer_at_1pct_bpcer"}.get(ckpt_key)
     probe_seed = cfg.extra.get("recapture_probe_seed", 0)
 
     Path("checkpoints").mkdir(exist_ok=True)
     best_metric = float("inf")
+    best_tiebreak = float("inf")
     for epoch in range(1, cfg.epochs + 1):
         train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer, auc_weight)
         val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion)
         m = evaluate(val_scores, val_labels)
-        lr = scheduler.get_last_lr()[0]
+        last_lrs = scheduler.get_last_lr()
+        lr = last_lrs[0] if len(last_lrs) == 1 else max(last_lrs)
         scheduler.step()
 
         probe_str = ""
@@ -319,14 +347,18 @@ def main() -> None:
             m["probe_apcer_at_1pct_bpcer"] = pm["apcer_at_1pct_bpcer"]
             probe_str = f" probe_AuDET={m['probe_audet']:.6f}"
 
+        lr_str = f"lr={lr:.2e}" if len(last_lrs) == 1 else f"lr_head={lr:.2e} lr_min={min(last_lrs):.2e}"
         print(
-            f"\n[epoch {epoch:>2}/{cfg.epochs}] lr={lr:.2e} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+            f"\n[epoch {epoch:>2}/{cfg.epochs}] {lr_str} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
             f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}{probe_str}"
         )
 
         current = m.get(ckpt_key, m["audet"])
-        if current < best_metric:
+        current_tie = m.get(tie_key, float("inf")) if tie_key else float("inf")
+        improved = current < best_metric or (current == best_metric and current_tie < best_tiebreak)
+        if improved:
             best_metric = current
+            best_tiebreak = current_tie
             ckpt = Path("checkpoints") / f"{cfg.name}.pt"
             torch.save(
                 {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
