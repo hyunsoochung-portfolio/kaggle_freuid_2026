@@ -29,6 +29,9 @@ track = [
 ]
 analysis = [
     "matplotlib>=3.8",
+    "grad-cam>=1.5",
+    "opencv-python-headless>=4.9",  # grad-cam depends on opencv-python (needs libGL); pin the
+                                     # headless build explicitly so it isn't pulled in instead
 ]
 
 [build-system]
