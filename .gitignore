@@ -245,3 +245,6 @@ data_smoke_*.zip
 # copies (same non-commercial license as data/*) and large reproducible feature caches
 reports/analysis_v0/borderline/
 reports/analysis_v0/drift_cache/
+# attn/figures: per-image overlays on real train/val/test images -- same proprietary-data
+# concern as borderline/ above, since every figure reproduces a real dataset image
+reports/analysis_v0/attn/figures/
