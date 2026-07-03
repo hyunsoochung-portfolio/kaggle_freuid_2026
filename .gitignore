@@ -248,3 +248,5 @@ reports/analysis_v0/drift_cache/
 # attn/figures: per-image overlays on real train/val/test images -- same proprietary-data
 # concern as borderline/ above, since every figure reproduces a real dataset image
 reports/analysis_v0/attn/figures/
+# same reasoning: illustrative recapture/tamper example images for docs/pipeline_finetune.md
+reports/pipeline_examples/
