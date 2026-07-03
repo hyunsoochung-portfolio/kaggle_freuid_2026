@@ -25,12 +25,14 @@ pretrained: true
 image_size: 518
 
 epochs: 20
-batch_size: 32        # unchanged from baseline_v1; see docs/finetune_v0_report.md for whether
-                       # this fit without train_last_k_blocks / grad_checkpointing fallback
-lr: 1.0e-4             # LLRD head/base LR (S1 used 2e-4; full fine-tune of a ViT needs a
-                       # smaller base LR -- ambiguity resolved by using standard LLRD practice
-                       # since baseline_v1's lr was tuned for a randomly-init CNN head only)
-weight_decay: 5.0e-2   # unchanged from baseline_v1
+batch_size:
+  32 # unchanged from baseline_v1; see docs/finetune.md for whether
+  # this fit without train_last_k_blocks / grad_checkpointing fallback
+lr:
+  1.0e-4 # LLRD head/base LR (S1 used 2e-4; full fine-tune of a ViT needs a
+  # smaller base LR -- ambiguity resolved by using standard LLRD practice
+  # since baseline_v1's lr was tuned for a randomly-init CNN head only)
+weight_decay: 5.0e-2 # unchanged from baseline_v1
 num_workers: 8
 
 val_fraction: 0.1
@@ -69,10 +71,11 @@ extra:
   # Gated block: absent/false in every other config, so this is fully additive.
   llrd:
     enabled: true
-    decay: 0.7          # per-block LR multiplier moving from head -> input
-    warmup_epochs: 2    # linear warmup, then cosine decay over the remaining epochs
-                          # (baseline_v1 has no warmup at all -- see src/freuid/train.py;
-                          # added only inside this gated LLRD path, S1 itself is unaffected)
+    decay: 0.7 # per-block LR multiplier moving from head -> input
+    warmup_epochs:
+      2 # linear warmup, then cosine decay over the remaining epochs
+      # (baseline_v1 has no warmup at all -- see src/freuid/train.py;
+      # added only inside this gated LLRD path, S1 itself is unaffected)
 
   # Fallback if full fine-tune doesn't fit batch_size=32: freeze all but the last k
   # transformer blocks + head. null = full fine-tune (default for this run).
@@ -90,4 +93,3 @@ extra:
   # other config (including baseline_v1) is completely unaffected -- see run_epoch's
   # scaler=None default in src/freuid/train.py.
   amp: true
-
