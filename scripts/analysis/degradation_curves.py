@@ -14,7 +14,17 @@ Interpretation guide (written into the report, not just this docstring):
   - If AuDET degrades sharply under blur/downscale/jpeg but stays low for card-only crops,
     that's consistent with the model actually using document-level forensic/content signal.
 
-Usage: python scripts/analysis/degradation_curves.py [--checkpoint PATH] [--limit N]
+Resumable by design (the VESSL workspace's container can silently recycle mid-run, wiping
+/tmp and the python env -- see project memory): each invocation processes ONE corruption
+(or all not-yet-done ones if --corruption is omitted), and immediately upserts its result
+into degradation_curves.csv before exiting, so a kill between corruptions loses at most one
+corruption's ~4-5 min of work, not the whole sweep.
+
+Usage:
+    python scripts/analysis/degradation_curves.py --list
+    python scripts/analysis/degradation_curves.py --corruption blur_sigma2
+    python scripts/analysis/degradation_curves.py            # runs all not-yet-done, one by one
+    python scripts/analysis/degradation_curves.py --plot-only  # just (re)draw the plot from the CSV
 """
 
 from __future__ import annotations
@@ -48,6 +58,7 @@ CARD_ONLY_NOTE = (
     "approximations, not true FastSAM-segmented card extraction -- treat them as coarse "
     "proxies for 'mostly document' vs 'mostly background', not exact isolations."
 )
+RESULT_CSV_NAME = "degradation_curves.csv"
 
 
 def _downscale_then_up(img: Image.Image, size: int, target: int) -> Image.Image:
@@ -104,67 +115,114 @@ def build_corruptions(native_size: int) -> dict[str, callable]:
     return corruptions
 
 
+def _load_existing(out_dir: Path) -> pd.DataFrame:
+    path = out_dir / RESULT_CSV_NAME
+    if path.exists():
+        return pd.read_csv(path)
+    return pd.DataFrame(columns=["corruption", "audet", "apcer_at_1pct_bpcer"])
+
+
+def _upsert(out_dir: Path, name: str, audet: float, apcer: float) -> pd.DataFrame:
+    df = _load_existing(out_dir)
+    df = df[df["corruption"] != name]
+    df = pd.concat([df, pd.DataFrame([{"corruption": name, "audet": audet, "apcer_at_1pct_bpcer": apcer}])],
+                    ignore_index=True)
+    df.to_csv(out_dir / RESULT_CSV_NAME, index=False)
+    return df
+
+
+def make_plot(result_df: pd.DataFrame, out_dir: Path) -> None:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[degradation] matplotlib not available -- skipped plot")
+        return
+    result_df = result_df.sort_values("corruption")
+    fig, ax = plt.subplots(figsize=(11, 5))
+    colors = ["#4477AA" if r != "clean" else "#CC3311" for r in result_df["corruption"]]
+    ax.bar(result_df["corruption"], result_df["audet"], color=colors)
+    if "clean" in result_df["corruption"].values:
+        ax.axhline(result_df.loc[result_df["corruption"] == "clean", "audet"].iloc[0],
+                   color="#CC3311", linestyle="--", linewidth=1, label="clean baseline")
+        ax.legend()
+    ax.set_ylabel("AuDET (lower = better)")
+    ax.set_title("finetune_v0: AuDET under single-corruption degradation")
+    ax.tick_params(axis="x", rotation=45)
+    for tick in ax.get_xticklabels():
+        tick.set_ha("right")
+    fig.tight_layout()
+    fig.savefig(out_dir / "degradation_curves.png", dpi=150)
+    print(f"[degradation] wrote {out_dir / 'degradation_curves.png'}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--limit", type=int, default=None, help="cap val images for speed")
+    parser.add_argument("--corruption", default=None, help="run only this corruption; omit to run all not-yet-done")
+    parser.add_argument("--force", action="store_true", help="recompute even if already in the CSV")
+    parser.add_argument("--list", action="store_true", help="print available corruption names and exit")
+    parser.add_argument("--plot-only", action="store_true", help="just (re)draw the plot from the existing CSV")
     args = parser.parse_args()
+
+    out_dir = ensure_report_dir()
+
+    if args.list:
+        print("\n".join(build_corruptions(0).keys()))
+        return
+
+    if args.plot_only:
+        make_plot(_load_existing(out_dir), out_dir)
+        return
 
     ckpt_path = Path(args.checkpoint) if args.checkpoint else DEFAULT_CHECKPOINT
     cfg, state = load_checkpoint(ckpt_path)
-    device = device_and_seed(cfg)
+
+    existing = _load_existing(out_dir)
+    done = set(existing["corruption"]) if not args.force else set()
 
     _, val_ids = get_split_ids(cfg)
     df = split_dataframe(cfg, val_ids)
     if args.limit:
         df = df.sample(n=min(args.limit, len(df)), random_state=cfg.seed).reset_index(drop=True)
-    print(f"[degradation] val n={len(df)}")
 
-    model = build_finetuned_model(cfg, state, device)
     transform, data_cfg = eval_transform(cfg)
     native_size = data_cfg["image_size"]
+    all_corruptions = build_corruptions(native_size)
 
-    print("[degradation] loading source images into memory once...")
+    if args.corruption:
+        if args.corruption not in all_corruptions:
+            raise SystemExit(f"unknown corruption {args.corruption!r}; --list for options")
+        todo = {args.corruption: all_corruptions[args.corruption]}
+    else:
+        todo = {k: v for k, v in all_corruptions.items() if k not in done}
+
+    if not todo:
+        print("[degradation] nothing to do -- all corruptions already in the CSV (use --force to redo)")
+        make_plot(_load_existing(out_dir), out_dir)
+        return
+
+    print(f"[degradation] val n={len(df)}  todo={list(todo)}  already_done={sorted(done)}")
+    device = device_and_seed(cfg)
+    model = build_finetuned_model(cfg, state, device)
+
+    print("[degradation] loading source images into memory...")
     raw_images = [Image.open(p).convert("RGB") for p in df["path"]]
     labels = df["label"].to_numpy()
 
-    corruptions = build_corruptions(native_size)
-    rows = []
-    for name, fn in corruptions.items():
+    for name, fn in todo.items():
         corrupted = [fn(im) for im in raw_images]
         scores = score_images(model, corrupted, transform, device, batch_size=32)
         m = evaluate(scores, labels)
-        rows.append({"corruption": name, "audet": m["audet"], "apcer_at_1pct_bpcer": m["apcer_at_1pct_bpcer"]})
-        print(f"[degradation] {name:28s} AuDET={m['audet']:.6f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.6f}")
+        _upsert(out_dir, name, m["audet"], m["apcer_at_1pct_bpcer"])
+        print(f"[degradation] {name:28s} AuDET={m['audet']:.6f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.6f} "
+              f"-- checkpointed to {RESULT_CSV_NAME}")
 
-    result_df = pd.DataFrame(rows)
-    out_dir = ensure_report_dir()
-    result_df.to_csv(out_dir / "degradation_curves.csv", index=False)
-
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        fig, ax = plt.subplots(figsize=(11, 5))
-        colors = ["#4477AA" if r != "clean" else "#CC3311" for r in result_df["corruption"]]
-        ax.bar(result_df["corruption"], result_df["audet"], color=colors)
-        ax.axhline(result_df.loc[result_df["corruption"] == "clean", "audet"].iloc[0],
-                   color="#CC3311", linestyle="--", linewidth=1, label="clean baseline")
-        ax.set_ylabel("AuDET (lower = better)")
-        ax.set_title("finetune_v0: AuDET under single-corruption degradation")
-        ax.tick_params(axis="x", rotation=45)
-        for tick in ax.get_xticklabels():
-            tick.set_ha("right")
-        ax.legend()
-        fig.tight_layout()
-        fig.savefig(out_dir / "degradation_curves.png", dpi=150)
-        print(f"[degradation] wrote {out_dir / 'degradation_curves.png'}")
-    except ImportError:
-        print("[degradation] matplotlib not available -- skipped plot, CSV still written")
-
+    make_plot(_load_existing(out_dir), out_dir)
     (out_dir / "degradation_curves_note.md").write_text(CARD_ONLY_NOTE + "\n", encoding="utf-8")
-    print(f"[degradation] wrote {out_dir / 'degradation_curves.csv'}")
+    print(f"[degradation] done. see {out_dir / RESULT_CSV_NAME}")
 
 
 if __name__ == "__main__":

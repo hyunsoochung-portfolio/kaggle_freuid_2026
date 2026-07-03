@@ -14,7 +14,16 @@ at each block's output:
 
 Never modifies the checkpoint or trains anything beyond a cheap linear probe used purely
 for measurement. Subsamples train/val for tractability (default 1500 each, stratified by
-label) -- pass --full to use the entire split (slower, more memory).
+label).
+
+Resumable by design (the VESSL workspace's container can silently recycle mid-run -- see
+project memory): the four expensive (model, split) feature-extraction passes are each
+cached to reports/analysis_v0/drift_cache/{model}_{split}.npy the moment they finish, and
+the exact ids used are pinned in drift_cache/manifest.json on first run so a resumed run
+reuses the identical subsample rather than risking a different draw. Re-running the same
+command skips any (model, split) pair whose cache file already exists, so a kill loses at
+most one pass (a few minutes), not the whole analysis. The final probe+CKA step is cheap
+and always recomputed from whatever is cached.
 
 Usage: python scripts/analysis/representation_drift.py [--checkpoint PATH] [--n-samples 1500]
 """
@@ -22,6 +31,7 @@ Usage: python scripts/analysis/representation_drift.py [--checkpoint PATH] [--n-
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -123,6 +133,53 @@ def probe_audet(train_feat: np.ndarray, train_y: np.ndarray, val_feat: np.ndarra
     return evaluate(scores, val_y)
 
 
+def _get_or_build_split_ids(cache_dir: Path, cfg, n_samples: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Loads the pinned id manifest if present (so cached .npy arrays stay valid across
+    resumed runs); otherwise samples fresh and writes the manifest."""
+    manifest_path = cache_dir / "manifest.json"
+    train_ids, val_ids = get_split_ids(cfg)
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("n_samples") != n_samples:
+            raise SystemExit(
+                f"drift_cache/manifest.json was built with n_samples={manifest.get('n_samples')}, "
+                f"but --n-samples={n_samples} was requested. Delete reports/analysis_v0/drift_cache/ "
+                "to start over with the new size, or pass the matching --n-samples."
+            )
+        train_df = split_dataframe(cfg, set(manifest["train_ids"]))
+        val_df = split_dataframe(cfg, set(manifest["val_ids"]))
+        print(f"[drift] reusing pinned subsample from {manifest_path}")
+        return train_df, val_df
+
+    train_df = stratified_subsample(split_dataframe(cfg, train_ids), n_samples, cfg.seed)
+    val_df = stratified_subsample(split_dataframe(cfg, val_ids), n_samples, cfg.seed)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps({
+        "n_samples": n_samples,
+        "train_ids": train_df["id"].astype(str).tolist(),
+        "val_ids": val_df["id"].astype(str).tolist(),
+    }))
+    print(f"[drift] wrote new subsample manifest -> {manifest_path}")
+    return train_df, val_df
+
+
+def _get_or_extract(cache_dir: Path, name: str, model_builder, cfg, state, paths: list[str], transform, device) -> np.ndarray:
+    cache_path = cache_dir / f"{name}.npy"
+    if cache_path.exists():
+        print(f"[drift] {name}: loading cached features from {cache_path}")
+        return np.load(cache_path)
+    model_name, split = name.split("_")
+    print(f"[drift] {name}: building {model_name} model and extracting features ({len(paths)} images)...")
+    model = model_builder(cfg, state, device) if model_name == "finetuned" else model_builder(cfg, device)
+    feats = extract_block_features(model, paths, transform, device)
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    np.save(cache_path, feats)
+    print(f"[drift] {name}: extracted and cached -> {cache_path}")
+    return feats
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default=None)
@@ -133,30 +190,22 @@ def main() -> None:
     cfg, state = load_checkpoint(ckpt_path)
     device = device_and_seed(cfg)
 
-    train_ids, val_ids = get_split_ids(cfg)
-    train_df = stratified_subsample(split_dataframe(cfg, train_ids), args.n_samples, cfg.seed)
-    val_df = stratified_subsample(split_dataframe(cfg, val_ids), args.n_samples, cfg.seed)
+    out_dir = ensure_report_dir()
+    cache_dir = out_dir / "drift_cache"
+    train_df, val_df = _get_or_build_split_ids(cache_dir, cfg, args.n_samples)
     print(f"[drift] train subsample n={len(train_df)} val subsample n={len(val_df)}")
 
     transform, _ = eval_transform(cfg)
 
-    print("[drift] loading pretrained model...")
-    pretrained = build_pretrained_model(cfg, device)
-    print("[drift] extracting pretrained block features (train)...")
-    pre_train = extract_block_features(pretrained, train_df["path"].tolist(), transform, device)
-    print("[drift] extracting pretrained block features (val)...")
-    pre_val = extract_block_features(pretrained, val_df["path"].tolist(), transform, device)
-    del pretrained
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-
-    print("[drift] loading fine-tuned model...")
-    finetuned = build_finetuned_model(cfg, state, device)
-    print("[drift] extracting fine-tuned block features (train)...")
-    ft_train = extract_block_features(finetuned, train_df["path"].tolist(), transform, device)
-    print("[drift] extracting fine-tuned block features (val)...")
-    ft_val = extract_block_features(finetuned, val_df["path"].tolist(), transform, device)
-    del finetuned
+    # Load each model at most once, only if at least one of its cache files is missing.
+    pre_train = _get_or_extract(cache_dir, "pretrained_train", build_pretrained_model, cfg, state,
+                                 train_df["path"].tolist(), transform, device)
+    pre_val = _get_or_extract(cache_dir, "pretrained_val", build_pretrained_model, cfg, state,
+                               val_df["path"].tolist(), transform, device)
+    ft_train = _get_or_extract(cache_dir, "finetuned_train", build_finetuned_model, cfg, state,
+                                train_df["path"].tolist(), transform, device)
+    ft_val = _get_or_extract(cache_dir, "finetuned_val", build_finetuned_model, cfg, state,
+                              val_df["path"].tolist(), transform, device)
 
     n_blocks = pre_train.shape[1]
     train_y, val_y = train_df["label"].to_numpy(), val_df["label"].to_numpy()
@@ -176,7 +225,6 @@ def main() -> None:
               f"finetuned AuDET={m_ft['audet']:.4f}  CKA={cka:.4f}")
 
     result_df = pd.DataFrame(rows)
-    out_dir = ensure_report_dir()
     result_df.to_csv(out_dir / "representation_drift.csv", index=False)
 
     try:
