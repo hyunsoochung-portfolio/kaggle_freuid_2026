@@ -81,3 +81,13 @@ extra:
   # torch gradient checkpointing on the ViT (model.set_grad_checkpointing) -- only turn on
   # if needed to fit batch_size=32 in memory.
   grad_checkpointing: false
+
+  # AMP (autocast + GradScaler), per CLAUDE.md's compute strategy -- train.py's shared
+  # run_epoch had no AMP path at all until this experiment (confirmed by reading it: no
+  # autocast anywhere), so baseline_v1 trained in plain FP32. A full-parameter ViT-B
+  # fine-tune at 518px in FP32 is too slow to finish 20 epochs in reasonable time on one
+  # A100 (confirmed via a single-batch timing diagnostic). Gated on extra.amp so every
+  # other config (including baseline_v1) is completely unaffected -- see run_epoch's
+  # scaler=None default in src/freuid/train.py.
+  amp: true
+

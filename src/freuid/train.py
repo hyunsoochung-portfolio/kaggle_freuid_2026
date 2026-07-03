@@ -9,6 +9,7 @@ competition metrics, and checkpoints the best AuDET to checkpoints/<name>.pt.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import math
 import random
 from pathlib import Path
@@ -26,7 +27,7 @@ from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
 
-def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: float = 0.0):
+def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: float = 0.0, scaler=None):
     """One pass. With an optimizer it trains; without, it evaluates.
 
     Returns (mean_loss, scores, labels) where scores = P(fraud). In train mode the
@@ -35,10 +36,16 @@ def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: floa
 
     auc_weight > 0 adds a pairwise soft-AUC term to the BCE loss (train only).
     auc_weight = 0.0 is bit-for-bit identical to plain BCE.
+
+    ``scaler`` (a ``torch.cuda.amp.GradScaler``) enables AMP (autocast + loss scaling)
+    when non-None and ``scaler.is_enabled()``; omitting it (the default for every
+    existing config) reproduces the original FP32 path exactly -- a disabled GradScaler
+    is a documented no-op passthrough for scale/step/update.
     """
     is_train = optimizer is not None
     model.train(is_train)
     total_loss, n_seen, all_scores, all_labels = 0.0, 0, [], []
+    use_amp = scaler is not None and scaler.is_enabled()
     for batch in tqdm(loader, leave=False):
         imgs, labels, face_meta = unpack_batch(batch)
         imgs = imgs.to(device)
@@ -46,17 +53,27 @@ def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: floa
         face_meta_dev = face_meta.to(device) if face_meta is not None else None
         # eval 모드에서는 불필요한 그래디언트 계산을 끄는 컨텍스트 매니저
         with torch.set_grad_enabled(is_train):
-            # 모델 forward() 호출. imgs [B, 3, H, W] -> logits [B, 1] (B=batch_size)
-            logits = model(imgs, face_meta_dev) if face_meta_dev is not None else model(imgs)
-            # BCE + optional pairwise AUC term (train only; val always uses plain BCE)
-            _aw = auc_weight if is_train else 0.0
-            loss = combined_loss(logits, labels_dev, criterion, _aw)
+            amp_ctx = (
+                torch.autocast(device_type="cuda", enabled=use_amp)
+                if device.type == "cuda" else contextlib.nullcontext()
+            )
+            with amp_ctx:
+                # 모델 forward() 호출. imgs [B, 3, H, W] -> logits [B, 1] (B=batch_size)
+                logits = model(imgs, face_meta_dev) if face_meta_dev is not None else model(imgs)
+                # BCE + optional pairwise AUC term (train only; val always uses plain BCE)
+                _aw = auc_weight if is_train else 0.0
+                loss = combined_loss(logits, labels_dev, criterion, _aw)
             if is_train:
                 optimizer.zero_grad()
-                loss.backward()
-                # 이 순간: model의 모든 파라미터 p에 대해 p.grad 가 채워짐 (기울기 계산 완료)
-                # 단, p 값(가중치) 자체는 아직 그대로
-                optimizer.step()
+                if use_amp:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    # 이 순간: model의 모든 파라미터 p에 대해 p.grad 가 채워짐 (기울기 계산 완료)
+                    # 단, p 값(가중치) 자체는 아직 그대로
+                    optimizer.step()
         bs = imgs.size(0)
         total_loss += loss.item() * bs
         n_seen += bs
@@ -180,12 +197,12 @@ def build_loaders(
     return train_loader, val_loader, probe_loader
 
 
-def _run_probe(model, probe_loader, device, criterion, seed: int) -> dict[str, float]:
+def _run_probe(model, probe_loader, device, criterion, seed: int, scaler=None) -> dict[str, float]:
     """Evaluate the degraded probe with a fixed seed so augmentation is the same each epoch."""
     import numpy as np
     random.seed(seed)
     np.random.seed(seed)
-    _, scores, labels = run_epoch(model, probe_loader, device, criterion)
+    _, scores, labels = run_epoch(model, probe_loader, device, criterion, scaler=scaler)
     return evaluate(scores, labels)
 
 
@@ -322,6 +339,14 @@ def main() -> None:
     if auc_weight > 0.0:
         print(f"[train] auc_loss_weight={auc_weight} (pairwise soft-AUC term active)")
 
+    # AMP: disabled GradScaler is a documented no-op passthrough, so this is safe to
+    # always construct and thread through run_epoch -- every config without
+    # extra.amp=True gets scaler.is_enabled()==False and reproduces the exact FP32 path.
+    amp_enabled = bool(cfg.extra.get("amp", False)) and device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled) if device.type == "cuda" else None
+    if amp_enabled:
+        print("[train] AMP enabled (autocast + GradScaler)")
+
     # Checkpoint criterion: "probe_audet" (recapture compass) or "audet" (in-domain).
     # Ties on the primary metric are broken by the matching APCER@1%BPCER (secondary
     # competition metric) so two epochs with identical AuDET don't checkpoint arbitrarily.
@@ -333,8 +358,8 @@ def main() -> None:
     best_metric = float("inf")
     best_tiebreak = float("inf")
     for epoch in range(1, cfg.epochs + 1):
-        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer, auc_weight)
-        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion)
+        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer, auc_weight, scaler=scaler)
+        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion, scaler=scaler)
         m = evaluate(val_scores, val_labels)
         last_lrs = scheduler.get_last_lr()
         lr = last_lrs[0] if len(last_lrs) == 1 else max(last_lrs)
@@ -342,7 +367,7 @@ def main() -> None:
 
         probe_str = ""
         if probe_loader is not None:
-            pm = _run_probe(model, probe_loader, device, criterion, probe_seed)
+            pm = _run_probe(model, probe_loader, device, criterion, probe_seed, scaler=scaler)
             m["probe_audet"] = pm["audet"]
             m["probe_apcer_at_1pct_bpcer"] = pm["apcer_at_1pct_bpcer"]
             probe_str = f" probe_AuDET={m['probe_audet']:.6f}"
