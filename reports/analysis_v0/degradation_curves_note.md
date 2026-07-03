@@ -1,0 +1,1 @@
+No document rectification/segmentation is available for finetune_v0 (extra.use_rectify is unset). 'card_only' and 'center_masked' below are plain center-crop / center-mask approximations, not true FastSAM-segmented card extraction -- treat them as coarse proxies for 'mostly document' vs 'mostly background', not exact isolations.

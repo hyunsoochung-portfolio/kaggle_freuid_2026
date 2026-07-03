@@ -240,3 +240,8 @@ kaggle.json
 # smoke-test mini dataset (not for VCS)
 data_smoke/
 data_smoke_*.zip
+
+# reports/analysis_v0: keep aggregate CSVs/PNGs/README, exclude raw competition test-image
+# copies (same non-commercial license as data/*) and large reproducible feature caches
+reports/analysis_v0/borderline/
+reports/analysis_v0/drift_cache/

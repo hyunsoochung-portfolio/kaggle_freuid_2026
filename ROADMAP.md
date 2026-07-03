@@ -15,6 +15,7 @@ FREUID = 1 - 2·g_audet·g_apcer / (g_audet + g_apcer) ← harmonic mean penalis
 | S2    | consistency_v0 | Frozen DINOv3 ViT-B/16 · patch self-consistency head        |
 | S3    | consistency_v1 | + face-region consistency · SCRFD face detector             |
 | S4    | ensemble_v0    | ConvNeXt-Base + DINOv3 · multi-seed/fold rank-average       |
+| —     | finetune_v0    | Decisive experiment: DINOv2 ViT-B/14, same as S2 but fully fine-tuned (LLRD+warmup+AMP), not frozen — de-confounds S1→S2's backbone-vs-trainability change |
 
 Gate to advance: beat the constant-0.5 baseline **and** the previous stage on probe AuDET + public LB FREUID score.
 Constant-0.5 baseline FREUID ≈ 1.0 (g_apcer collapses to 0 → harmonic mean = 0).
@@ -29,6 +30,8 @@ Constant-0.5 baseline FREUID ≈ 1.0 (g_apcer collapses to 0 → harmonic mean =
 | baseline_v1    | convnext_small.fb_in22k_ft_in1k     | 10 (best ep9)  | 0.000039                | 0.0000    | 0.18129          | synth p=0.3, auc_w=0.1, TTA 3-scale; submitted                       |
 | consistency_v0 | dinov2_vitb14 (frozen) + GlobalHead | 20 (best ep20) | 0.061290                | 0.0280    | 0.30743          | 149K trainable, synth p=0.3, auc_w=0.1, TTA [448,518,588]; submitted |
 | consistency_v1 | dinov3_vitb16 (frozen) + Global+Patch+Face fusion | 20 (best ep18) | 0.117463 | 0.1136 | 0.61753 | 10.27M trainable, synth p=0.3, auc_w=0.1, TTA [448,512,528]; submitted -- regression vs v0, see docs/problem.md |
+| consistency_v1 (gated fix) | dinov3_vitb16 (frozen) + Global+Patch+Face, LayerScale gates + FaceRegionHead LayerNorm | 20 (best ep19) | 0.115286 | 0.1020 | 0.47469 | same config, gated-fusion fix per docs/problem.md; public LB improved 0.618→0.475 but still worse than v0 (0.307) and baseline_v1 (0.181) -- gate not cleared, see docs/consistency.md |
+| finetune_v0 | dinov2_vitb14 (**fully fine-tuned**, LLRD+warmup+AMP) | 20 (best ep13) | 0.000002 | 0.0000 | 0.00744 | decisive experiment: same backbone as consistency_v0 but fine-tuned not frozen, same recipe as baseline_v1 otherwise; submitted -- gate CLEARED vs baseline_v1 on both signals, best result in the project, see docs/finetune.md |
 
 ---
 
@@ -68,6 +71,51 @@ Constant-0.5 baseline FREUID ≈ 1.0 (g_apcer collapses to 0 → harmonic mean =
 > ~65x consistency_v0's entire head, and likely hasn't converged in 20 head-only epochs), plus a
 > confirmed missing-LayerNorm scale bug in FaceRegionHead's output. Proposed fix: gated
 > (LayerScale-style) fusion + the LayerNorm fix, before re-attempting S3.
+
+### S3 retry (gated fusion fix) — STILL NOT CLEARED ✗
+
+- [x] LayerScale-style per-branch gates added (patch_gate, face_gate, init 1e-3) + FaceRegionHead LayerNorm fix
+- [x] full retrain: probe_AuDET=0.1153 (best ep19), val_AuDET=0.1020 -- only ~2% better than the buggy run locally
+- [x] TTA integrity passed (rows=142818, zeros=0, range=[0.000043, 1.0])
+- [x] submitted: public LB FREUID=0.4747 -- notably better than the buggy run (0.618 → 0.475, ~23% relative) despite the small local move
+- [ ] consistency_v1 (fixed) probe_AuDET < consistency_v0 probe_AuDET (0.1153 > 0.0613 — **still regressed**)
+- [ ] consistency_v1 (fixed) public LB FREUID < consistency_v0 public LB FREUID (0.475 > 0.307 — **still regressed**)
+
+> **Diagnosis**: the gating fix recovered a real chunk of the S3 regression (especially on public
+> LB, where the gap to consistency_v0 shrank more than local probe_AuDET suggested) but did not
+> close it. Patch/face heads are still net-negative even when gated near-zero at init. Open
+> question: whether the gates actually opened during training (unverified — inspect
+> `patch_gate`/`face_gate` values in the saved checkpoint) or the branches themselves aren't
+> learning a useful signal regardless of gating. See [docs/consistency.md](docs/consistency.md)
+> for full context and next-step options (weight-decay exclusion for LayerNorm/bias, re-ablation
+> with gating, confounded DINOv2→DINOv3 backbone swap between S2 and S3).
+
+## finetune_v0 gate checklist (decisive experiment) — CLEARED ✓
+
+- [x] resolved-config diff vs baseline_v1: only backbone, image_size, tta scales, lr (LLRD head LR),
+      and the new llrd/train_last_k_blocks/grad_checkpointing/amp keys differ (scripts/config_diff.py)
+- [x] smoke: init BCE=0.6931, LLRD 28 param groups (lr range [9.69e-07, 1.00e-04]), warmup schedule
+      confirmed exact (1.00e-06 → 5.05e-05 → 1.00e-04 over epochs 1-3), multi-scale TTA forward
+      (476/518/560) confirmed no pos-embed errors
+- [x] built-in `--sanity` single-batch overfit failed under the shared harness's hardcoded SGD
+      (diverges to NaN on a full ViT-B -- known instability, not a wiring bug); confirmed via an
+      AdamW diagnostic instead (loss=0.000124 after 300 steps) -- gradient flow/capacity intact
+- [x] full train: probe_AuDET=0.000002 (best ep13), val_AuDET=0.0000
+- [x] TTA integrity passed (rows=142818, unique_scores=4254, exact_zeros=0, range=[0.009256, 1.0])
+- [x] finetune_v0 probe_AuDET < baseline_v1 probe_AuDET (0.000002 < 0.000039 -- ~20x better)
+- [x] finetune_v0 public LB FREUID < baseline_v1 public LB FREUID (0.00744 < 0.18129 -- ~24x better)
+
+> **Diagnosis**: this is the largest improvement in the project's history and it resolves the
+> open question from S2/S3. The S1→S2 change bundled backbone swap AND freezing at once; this
+> experiment isolates trainability by fine-tuning the exact same DINOv2 ViT-B/14 backbone S2
+> used. Fully fine-tuned, it dramatically beats S1, not just matches it -- **backbone freezing,
+> not the ViT backbone itself, was the S2/S3 regression's real cause.** The consistency-heads
+> bet (S2/S3) was never given a fair test: the frozen-backbone confound dominated whatever
+> patch/face-consistency signal those heads might have added. `finetune_v0` is now the
+> strongest submission in the project and the new baseline to beat. Reframes S4 around a
+> fine-tuned-CNN + fine-tuned-ViT rank ensemble rather than the frozen-backbone consistency
+> path; whether consistency heads add value *on top of* a fine-tuned (not frozen) ViT is now
+> the open question. See [docs/finetune.md](docs/finetune.md) for the full writeup.
 
 ---
 
