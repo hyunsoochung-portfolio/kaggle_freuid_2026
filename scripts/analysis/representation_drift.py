@@ -118,11 +118,9 @@ def stratified_subsample(df: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
     if len(df) <= n:
         return df.reset_index(drop=True)
     frac = n / len(df)
-    return (
-        df.groupby("label", group_keys=False)
-        .apply(lambda g: g.sample(frac=frac, random_state=seed))
-        .reset_index(drop=True)
-    )
+    # DataFrameGroupBy.sample() (not .apply(lambda g: g.sample(...))) -- the apply form drops
+    # the grouping column ("label") under pandas>=3.0's new include_groups default.
+    return df.groupby("label", group_keys=False).sample(frac=frac, random_state=seed).reset_index(drop=True)
 
 
 def probe_audet(train_feat: np.ndarray, train_y: np.ndarray, val_feat: np.ndarray, val_y: np.ndarray, seed: int) -> dict:
