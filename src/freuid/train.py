@@ -165,7 +165,10 @@ def _run_training(cfg: Config, data_cfg: dict, device, batch_size: int) -> None:
         optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     use_amp = cfg.amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    try:
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)  # torch >= 2.4
+    except (AttributeError, TypeError):
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)  # torch 2.3.x (the VESSL image)
     scheduler = build_scheduler(optimizer, cfg, steps_per_epoch=len(train_loader))
     print(
         f"[train] amp={use_amp} llrd={cfg.llrd_decay} warmup_epochs={cfg.warmup_epochs} "

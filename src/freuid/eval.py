@@ -54,9 +54,11 @@ def main() -> None:
         cfg = Config(**{k: v for k, v in ckpt_cfg.items() if k in known})
     else:
         raise SystemExit("checkpoint has no stored config — pass --config explicitly")
-    if ckpt_cfg:  # model-defining params always from the checkpoint
+    if ckpt_cfg:  # model-defining params always from the checkpoint (must match the weights)
         cfg.backbone = ckpt_cfg.get("backbone", cfg.backbone)
         cfg.image_size = ckpt_cfg.get("image_size", cfg.image_size)
+        cfg.pool = ckpt_cfg.get("pool", cfg.pool)
+        cfg.head_dropout = ckpt_cfg.get("head_dropout", cfg.head_dropout)
 
     seed_everything(cfg.seed)
     device = pick_device()
@@ -72,7 +74,10 @@ def main() -> None:
     loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
     print(f"[eval] device={device} | backbone={cfg.backbone} | val n={len(ds)}")
 
-    model = build_model(cfg.backbone, pretrained=False).to(device)
+    model = build_model(
+        cfg.backbone, pretrained=False, head_dropout=cfg.head_dropout,
+        pool=cfg.pool, image_size=cfg.image_size,
+    ).to(device)
     model.load_state_dict(state["model"])
     model.eval()
 
