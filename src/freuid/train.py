@@ -297,6 +297,29 @@ def _sanity_overfit(model, loader, device, criterion, steps: int = 100, target: 
     print(f"[sanity] single-batch overfit: loss={final:.6f} after {steps} steps OK")
 
 
+
+def _safe_save(state: dict, ckpt_path: Path, retries: int = 3, delay: float = 2.0) -> bool:
+    """torch.save with retries -- a transient Drive-symlink hiccup (e.g. right as
+    the Colab runtime disconnects) would otherwise crash the whole run and lose
+    that epoch's result. Falls back to a local copy if Drive keeps failing so the
+    checkpoint isn't lost outright."""
+    import time
+    for attempt in range(retries):
+        try:
+            torch.save(state, ckpt_path)
+            return True
+        except (RuntimeError, OSError) as e:
+            print(f"[train] WARNING: checkpoint save failed (attempt {attempt + 1}/{retries}): {e}")
+            time.sleep(delay)
+    fallback = Path("/content") / ckpt_path.name
+    try:
+        torch.save(state, fallback)
+        print(f"[train] WARNING: saved fallback checkpoint locally at {fallback} (Drive save failed)")
+    except Exception as e:
+        print(f"[train] ERROR: fallback save also failed: {e}")
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -345,7 +368,7 @@ def main():
             if m["audet"] < best_audet:
                 best_audet = m["audet"]
                 ckpt = Path("checkpoints") / f"{cfg.name}.pt"
-                torch.save({"model": model.state_dict(), "config": vars(cfg), "epoch": epoch,
+                _safe_save({"model": model.state_dict(), "config": vars(cfg), "epoch": epoch,
                             "metrics": m, "model_kind": model_kind}, ckpt)
                 print(f"  -> saved {ckpt} (AuDET={best_audet:.4f})")
         return
@@ -443,7 +466,7 @@ def main():
             best_metric = current
             best_tiebreak = current_tie
             ckpt = Path("checkpoints") / f"{cfg.name}.pt"
-            torch.save(
+            _safe_save(
                 {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
                 ckpt,
             )
