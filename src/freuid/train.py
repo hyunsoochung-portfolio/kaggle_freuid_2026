@@ -9,6 +9,8 @@ competition metrics, and checkpoints the best AuDET to checkpoints/<name>.pt.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import math
 from pathlib import Path
 
 import torch
@@ -18,17 +20,21 @@ from tqdm import tqdm
 from freuid.config import Config, load_config
 from freuid.data import FreuidDataset, domain_holdout_split, stratified_split
 from freuid.metrics import evaluate
-from freuid.models import build_model
+from freuid.models import build_model, llrd_param_groups
 from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
 
-def run_epoch(model, loader, device, criterion, optimizer=None):
+def run_epoch(model, loader, device, criterion, optimizer=None, scheduler=None, scaler=None,
+              use_amp=False):
     """One pass. With an optimizer it trains; without, it evaluates.
 
     Returns (mean_loss, scores, labels) where scores = P(fraud). In train mode the
     scores/labels are not collected (they would force a GPU->CPU sync every batch and
     are unused), so both are returned as None.
+
+    scheduler steps per-batch (warmup/cosine is a per-step schedule); scaler + use_amp
+    enable mixed precision. When use_amp is False everything reduces to the plain path.
     """
     is_train = optimizer is not None
     model.train(is_train)
@@ -36,18 +42,25 @@ def run_epoch(model, loader, device, criterion, optimizer=None):
     for imgs, labels in tqdm(loader, leave=False):
         imgs = imgs.to(device)
         targets = labels.float().unsqueeze(1).to(device)
+        # AMP(혼합정밀): forward/loss를 float16으로 계산해 속도·메모리 절약. use_amp=False면 무효.
+        amp_ctx = torch.autocast(device_type="cuda", enabled=True) if use_amp \
+            else contextlib.nullcontext()
         # eval 모드에서는 불필요한 그래디언트 계산을 끄는 컨텍스트 매니저
-        with torch.set_grad_enabled(is_train):
+        with torch.set_grad_enabled(is_train), amp_ctx:
             # 모델 forward() 호출. imgs [B, 3, H, W] -> logits [B, 1] (B=batch_size)
             logits = model(imgs)
             # B개의 샘플에 대한 BCEWithLogitsLoss 계산. logits [B, 1], targets [B, 1] -> loss [1]
             loss = criterion(logits, targets)
-            if is_train:
-                optimizer.zero_grad()
-                loss.backward()
-                # 이 순간: model의 모든 파라미터 p에 대해 p.grad 가 채워짐 (기울기 계산 완료)
-                # 단, p 값(가중치) 자체는 아직 그대로
-                optimizer.step()
+        if is_train:
+            optimizer.zero_grad()
+            # scaler: AMP underflow 방지 (loss 키워 backward, step서 복원). 꺼지면 통과.
+            scaler.scale(loss).backward()
+            # 이 순간: model의 모든 파라미터 p에 대해 p.grad 가 채워짐 (기울기 계산 완료)
+            # 단, p 값(가중치) 자체는 아직 그대로
+            scaler.step(optimizer)
+            scaler.update()
+            if scheduler is not None:
+                scheduler.step()  # per-batch LR 갱신 (warmup→cosine)
         bs = imgs.size(0)
         total_loss += loss.item() * bs
         n_seen += bs
@@ -103,6 +116,28 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
     return train_loader, val_loader
 
 
+def build_scheduler(optimizer, cfg: Config, steps_per_epoch: int):
+    """Linear warmup for warmup_epochs, then cosine decay to lr_min. None if warmup_epochs<=0.
+
+    A per-step LambdaLR that multiplies EVERY param group's base LR by the same factor, so
+    LLRD's per-layer ratios are preserved through warmup and decay.
+    """
+    if not cfg.warmup_epochs or cfg.warmup_epochs <= 0:
+        return None
+    total_steps = max(1, steps_per_epoch * cfg.epochs)
+    warmup_steps = max(1, int(steps_per_epoch * cfg.warmup_epochs))
+    min_ratio = cfg.lr_min / cfg.lr if cfg.lr else 0.0
+
+    def lr_factor(step: int) -> float:
+        if step < warmup_steps:  # 0 → 1.0 선형 상승
+            return (step + 1) / warmup_steps
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))  # 1.0 → 0.0 코사인 하강
+        return min_ratio + (1.0 - min_ratio) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -122,15 +157,34 @@ def main() -> None:
     train_loader, val_loader = build_loaders(cfg, data_cfg)
     print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
 
-    model = build_model(cfg.backbone, cfg.pretrained).to(device)
+    model = build_model(
+        cfg.backbone, cfg.pretrained, cfg.head_dropout, cfg.pool, data_cfg["image_size"]
+    ).to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+
+    # optimizer: LLRD → earlier layers get a smaller LR (llrd_param_groups); else one uniform group.
+    if cfg.llrd_decay:
+        param_groups = llrd_param_groups(model, cfg.lr, cfg.weight_decay, cfg.llrd_decay)
+        optimizer = torch.optim.AdamW(param_groups)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+
+    use_amp = cfg.amp and device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scheduler = build_scheduler(optimizer, cfg, steps_per_epoch=len(train_loader))
+    print(
+        f"[train] amp={use_amp} llrd={cfg.llrd_decay} warmup_epochs={cfg.warmup_epochs} "
+        f"lr={cfg.lr} groups={len(optimizer.param_groups)} "
+        f"head_dropout={cfg.head_dropout} pool={cfg.pool}"
+    )
 
     Path("checkpoints").mkdir(exist_ok=True)
     best_audet = float("inf")
     for epoch in range(1, cfg.epochs + 1):
-        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer)
-        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion)
+        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer,
+                                   scheduler=scheduler, scaler=scaler, use_amp=use_amp)
+        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion,
+                                                     use_amp=use_amp)
         m = evaluate(val_scores, val_labels)
         print(
             f"epoch {epoch:>2}: train_loss={train_loss:.4f} val_loss={val_loss:.4f} "

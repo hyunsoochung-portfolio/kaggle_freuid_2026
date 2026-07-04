@@ -25,6 +25,8 @@ class Config:
     # model
     backbone: str = "tf_efficientnetv2_s.in21k"
     pretrained: bool = True
+    head_dropout: float = 0.0  # dropout before the final linear head (0 = timm default)
+    pool: str | None = None  # global_pool override ("avg"/"token"/...); None = backbone default
 
     # train
     epochs: int = 20
@@ -33,6 +35,12 @@ class Config:
     weight_decay: float = 1e-4
     num_workers: int = 8
     limit: int | None = None  # cap train/val sizes for quick dev runs; None = full data
+
+    # fine-tuning recipe (all default to OFF so existing configs behave exactly as before)
+    amp: bool = False  # mixed precision (only takes effect on CUDA); big speed/memory win for ViT
+    warmup_epochs: float = 0.0  # >0 → linear LR warmup then cosine decay; 0 → constant LR
+    lr_min: float = 0.0  # cosine floor (absolute LR at the end of training)
+    llrd_decay: float | None = None  # layer-wise LR decay factor (e.g. 0.75); None = uniform LR
 
     extra: dict[str, Any] = field(default_factory=dict)
 

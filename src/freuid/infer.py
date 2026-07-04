@@ -67,9 +67,12 @@ def resolve_config(args) -> tuple[Config, dict]:
         raise SystemExit("checkpoint has no stored config — pass --config explicitly")
 
     # Model-defining params ALWAYS come from the checkpoint (guarantees the weights match).
+    # pool changes the forward (which tokens get pooled), so it must match training too.
     if ckpt_cfg:
         cfg.backbone = ckpt_cfg.get("backbone", cfg.backbone)
         cfg.image_size = ckpt_cfg.get("image_size", cfg.image_size)
+        cfg.pool = ckpt_cfg.get("pool", cfg.pool)
+        cfg.head_dropout = ckpt_cfg.get("head_dropout", cfg.head_dropout)
 
     # Runtime / environment overrides.
     if args.data_dir is not None:
@@ -109,7 +112,11 @@ def main() -> None:
 
     # backbone 이름으로 모델 아키텍처만 만들고(pretrained=False),
     # checkpoint에 저장된 가중치로 초기화. 모델이 device(GPU/CPU)에 올라감.
-    model = build_model(cfg.backbone, pretrained=False).to(device)
+    # image_size/pool 을 학습 때와 똑같이 줘야 가중치 shape·forward 가 일치함.
+    model = build_model(
+        cfg.backbone, pretrained=False, head_dropout=cfg.head_dropout,
+        pool=cfg.pool, image_size=cfg.image_size,
+    ).to(device)
     model.load_state_dict(state["model"]) #checkpoint에 저장된 모델 가중치로 모델 초기화
     model.eval() #평가 모드로 전환. 드롭아웃/배치정규화 등 학습 전용 동작 끔.
 
