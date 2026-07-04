@@ -28,7 +28,10 @@ backbone: vit_base_patch14_reg4_dinov2.lvd142m
 pretrained: true
 image_size: 518
 
-epochs: 20
+epochs: 10  # halved from finetune_v0's 20 for faster turnaround -- see note in
+            # reports/ab_recapture/README.md: this is a deliberate deviation from strict
+            # config parity with arm A, so "arm B last-epoch" (epoch 10) is not directly
+            # comparable to an arm A epoch-10 snapshot (not retained; only best.pt exists).
 batch_size:
   32
 lr:
