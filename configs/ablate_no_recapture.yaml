@@ -56,6 +56,11 @@ extra:
   recapture_probe_seed: 1234
   checkpoint_metric: probe_audet
 
+  # Retain the final-epoch weights too (arm A's finetune_v0.pt only kept its single
+  # probe-selected best checkpoint, so that comparison isn't available for arm A -- see
+  # reports/ab_recapture/README.md). Additive, off by default everywhere else.
+  save_last_epoch: true
+
   tta: [476, 518, 560]
 
   missing_id_score: 0.5

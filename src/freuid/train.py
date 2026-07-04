@@ -402,6 +402,18 @@ def main() -> None:
             )
             print(f"  -> saved {ckpt} ({ckpt_key}={best_metric:.6f})")
 
+        # Optional: also retain the final epoch's weights regardless of checkpoint_metric,
+        # so a "does probe-based selection bias the A/B comparison" check has a last-epoch
+        # checkpoint to compare against. Off by default (every existing config, including
+        # finetune_v0, is unaffected); gate with extra.save_last_epoch: true.
+        if epoch == cfg.epochs and cfg.extra.get("save_last_epoch", False):
+            last_ckpt = Path("checkpoints") / f"{cfg.name}_last.pt"
+            torch.save(
+                {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
+                last_ckpt,
+            )
+            print(f"  -> saved {last_ckpt} (final epoch, unconditional)")
+
 
 if __name__ == "__main__":
     main()
