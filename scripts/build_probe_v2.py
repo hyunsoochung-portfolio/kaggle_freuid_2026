@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -160,6 +161,20 @@ def degrade(img: Image.Image, sample_id: str, severity: str) -> Image.Image:
     return Image.fromarray(arr2)
 
 
+def _process_one(args: tuple[str, str, str, str]) -> tuple[str, str, bool]:
+    """Worker fn (module-level so it's picklable for ProcessPoolExecutor)."""
+    sid, severity, src, out_path = args
+    src_p, out_p = Path(src), Path(out_path)
+    if out_p.exists():
+        return sid, severity, True
+    if not src_p.exists():
+        return sid, severity, False
+    img = Image.open(src_p).convert("RGB")
+    degraded = degrade(img, sid, severity)
+    degraded.save(out_p)
+    return sid, severity, True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/finetune_v0.yaml",
@@ -168,6 +183,7 @@ def main() -> None:
     parser.add_argument("--severities", nargs="+", default=list(SEVERITIES),
                          help=f"subset of {list(SEVERITIES)} to generate")
     parser.add_argument("--limit", type=int, default=None, help="cap ids for a quick smoke run")
+    parser.add_argument("--workers", type=int, default=32, help="process pool size (CPU-bound PIL work)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -182,24 +198,23 @@ def main() -> None:
     df = load_labels(cfg.data_dir, "train").set_index("id")
 
     out_root = Path(args.out_dir)
+    work: list[tuple[str, str, str, str]] = []
     for severity in args.severities:
         out_dir = out_root / severity
         out_dir.mkdir(parents=True, exist_ok=True)
-        n_ok, n_missing = 0, 0
-        for sid in tqdm(val_ids_sorted, desc=f"probe_v2/{severity}"):
-            out_path = out_dir / f"{sid}.png"
-            if out_path.exists():
-                n_ok += 1
-                continue
-            src = Path(df.loc[sid, "path"])
-            if not src.exists():
-                n_missing += 1
-                continue
-            img = Image.open(src).convert("RGB")
-            degraded = degrade(img, sid, severity)
-            degraded.save(out_path)
-            n_ok += 1
-        print(f"[build_probe_v2] {severity}: {n_ok} written/present, {n_missing} source images missing")
+        for sid in val_ids_sorted:
+            work.append((sid, severity, str(df.loc[sid, "path"]), str(out_dir / f"{sid}.png")))
+
+    print(f"[build_probe_v2] {len(work)} (id, severity) pairs across {args.workers} workers")
+    counts: dict[str, dict[str, int]] = {s: {"ok": 0, "missing": 0} for s in args.severities}
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        futures = [pool.submit(_process_one, w) for w in work]
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="probe_v2"):
+            sid, severity, ok = fut.result()
+            counts[severity]["ok" if ok else "missing"] += 1
+
+    for severity, c in counts.items():
+        print(f"[build_probe_v2] {severity}: {c['ok']} written/present, {c['missing']} source images missing")
 
     print(f"[build_probe_v2] done -> {out_root}/ (not committed; data/* is gitignored)")
 
