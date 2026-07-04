@@ -1,0 +1,29 @@
+# DINOv2 ViT-B/14 full fine-tune with the recipe that wins on this task:
+# strong self-supervised backbone + LLRD + warmup/cosine + AMP + low LR.
+# No cross-domain holdout — plain random split, so we train on all document types.
+name: dinov2_v1
+seed: 42
+
+# data
+data_dir: data
+image_size: 224            # patch14 → must be a multiple of 14 (224 = 14*16); native is 518
+val_fraction: 0.1          # random stratified split (val_types removed → uses all domains)
+
+# model
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+head_dropout: 0.1          # dropout before the linear head
+pool: avg                  # mean-pool patch tokens (vs CLS-only) — better for spread-out artifacts
+
+# train
+epochs: 8
+batch_size: 64
+lr: 0.0001                 # top-group base LR; LLRD gives lower layers a smaller LR
+weight_decay: 0.05
+num_workers: 8
+
+# fine-tuning recipe
+amp: true                  # mixed precision (CUDA only)
+warmup_epochs: 1.0         # linear warmup then cosine decay
+lr_min: 0.000001           # cosine floor
+llrd_decay: 0.75           # layer-wise LR decay factor
