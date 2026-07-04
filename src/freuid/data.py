@@ -193,7 +193,8 @@ def lodo_split(root: str | Path, val_doc_type: str) -> tuple[set[str], set[str]]
     val_labels = set(df.loc[val_mask, "label"])
     if val_labels != {0, 1}:
         raise ValueError(
-            f"held-out domain {val_doc_type!r} has labels {val_labels}; need both 0 and 1"
+            f"held-out domain {val_doc_type!r} has labels {val_labels}; need both 0 and 1 "
+            "(AuDET / ROC-AUC is undefined on a single-class validation set)"
         )
     return set(df.loc[~val_mask, "id"]), set(df.loc[val_mask, "id"])
 
