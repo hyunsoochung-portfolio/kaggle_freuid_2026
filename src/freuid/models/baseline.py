@@ -57,6 +57,7 @@ def llrd_param_groups(
     no_wd_names = set(model.no_weight_decay()) if hasattr(model, "no_weight_decay") else set()
 
     def layer_id(name: str) -> int:
+        name = name.removeprefix("_orig_mod.")  # tolerate torch.compile-wrapped param names
         if name.startswith("blocks."):
             return int(name.split(".")[1]) + 1
         if name.startswith(("patch_embed", "cls_token", "pos_embed", "reg_token", "mask_token")):

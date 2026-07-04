@@ -150,19 +150,22 @@ def _run_training(cfg: Config, data_cfg: dict, device, batch_size: int) -> None:
     ).to(device)
     if cfg.grad_checkpointing and hasattr(model, "set_grad_checkpointing"):
         model.set_grad_checkpointing()  # recompute activations in backward → big memory saving
-    if cfg.compile:
-        try:
-            model = torch.compile(model)  # JIT graph fusion; ~1.3-2x on ViT
-        except Exception as e:  # best-effort: fall back to eager if compile isn't available
-            print(f"[train] torch.compile failed ({e}); running eager")
     criterion = torch.nn.BCEWithLogitsLoss()
 
-    # optimizer: LLRD → earlier layers get a smaller LR (llrd_param_groups); else one uniform group.
+    # optimizer BEFORE compile: LLRD reads param names, but torch.compile prefixes them with
+    # '_orig_mod.' which breaks the layer matching. Params are shared, so the optimizer built
+    # here still drives the compiled model. (LLRD → earlier layers get a smaller LR.)
     if cfg.llrd_decay:
         param_groups = llrd_param_groups(model, cfg.lr, cfg.weight_decay, cfg.llrd_decay)
         optimizer = torch.optim.AdamW(param_groups)
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+
+    if cfg.compile:
+        try:
+            model = torch.compile(model)  # JIT graph fusion; ~1.3-2x on ViT
+        except Exception as e:  # best-effort: fall back to eager if compile isn't available
+            print(f"[train] torch.compile failed ({e}); running eager")
 
     use_amp = cfg.amp and device.type == "cuda"
     try:
