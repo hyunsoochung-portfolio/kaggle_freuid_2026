@@ -15,19 +15,18 @@ Label convention matches metrics.py: 1 = fraud, 0 = bona-fide, -1 = unknown (tes
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from pathlib import Path
-
 import logging
+from dataclasses import dataclass, field
+from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
+from PIL import Image, ImageChops
 from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
-
 
 # face_meta tensor layout: [x1_frac, y1_frac, x2_frac, y2_frac, valid] -- must match
 # freuid.consistency_model.FACE_META_DIM. Kept as a plain constant here (rather than an
@@ -46,33 +45,25 @@ SPLITS: dict[str, tuple[str, str]] = {
 class Sample:
     id: str
     path: Path
-    label: int  # 1 = fraud, 0 = bona-fide, -1 = unknown (test)
+    label: int
     is_digital: bool | None = None
     type: str | None = None  # "COUNTRY/DOCTYPE", e.g. "EGYPT/DL"
-    card_path: Path | None = None   # rectified card PNG from regions cache (use_rectify)
+    card_path: Path | None = None  # rectified card PNG from regions cache (use_rectify)
     face_box: dict | None = field(default=None, repr=False)  # bbox from regions cache (use_face_region)
 
 
 def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
-    """Labels dataframe for a split, with a resolved absolute ``path`` column.
-
-    Paths are rebuilt from the id to dodge the double-nesting mismatch. For
-    ``public_test`` the csv is the sample submission (no real labels) → label = -1.
-    """
     if split not in SPLITS:
         raise ValueError(f"unknown split {split!r}; expected one of {list(SPLITS)}")
     root = Path(root)
     img_dir, csv_name = SPLITS[split]
-    df = pd.read_csv(root / csv_name, dtype={"id": str})  # keep hex ids as strings
-
+    df = pd.read_csv(root / csv_name, dtype={"id": str})
     df["path"] = df["id"].map(lambda i: root / img_dir / f"{i}.jpeg")
     if split == "public_test":
         df["label"] = -1
         for col in ("is_digital", "type"):
             df[col] = df.get(col)
     return df
-#[id, image_path, label, path, is_digital, type] tables are used in 
-#train/val/test splits, and the path column is used to load images. 
 
 
 def unpack_batch(batch):
@@ -156,10 +147,10 @@ class FreuidDataset(Dataset):
                 face_box=face_box,
             ))
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx):
         s = self.samples[idx]
         src = s.card_path if s.card_path is not None else s.path
         img = Image.open(src).convert("RGB")
@@ -170,29 +161,10 @@ class FreuidDataset(Dataset):
             return img, s.label, face_meta_tensor(s, img_size)
         return img, s.label
 
-    # __getitem__ / __len__ 은 파이썬의 "정해진 이름"(특수 메서드)이라, 이것만 구현하면
-    # 이 객체는 dataset[i] 와 len(dataset) 으로 다룰 수 있다:
-    #   - dataset[i]   → 파이썬이 자동으로 __getitem__(i) 호출
-    #   - len(dataset) → 자동으로 __len__() 호출
-    # DataLoader는 바로 이 약속(dataset[i], len(dataset))에 기대어 동작한다:
-    #   for batch in loader:        # DataLoader가
-    #       i = sampler가 고른 인덱스  #   순서를 정하고(shuffle이면 섞음)
-    #       sample = dataset[i]     #   우리 __getitem__(i) 를 자동 호출해 한 장씩 받아
-    #       ...                     #   batch_size개 모아 텐서로 쌓아(collate) 배치로 넘김
-    # 즉 우리가 만든 클래스라도 "정해진 메서드 이름"만 채우면 DataLoader가 알아서 호출한다.
 
-
-def stratified_split(
-    root: str | Path,
-    val_fraction: float = 0.1,
-    seed: int = 42,
-    stratify_on: tuple[str, ...] = ("label", "type"),
-) -> tuple[set[str], set[str]]:
-    """Split train ids into (train_ids, val_ids), stratified by label×type.
-
-    Stratifying on type as well as label keeps every document domain represented in
-    validation, which matters because the test set probes cross-domain generalization.
-    """
+def stratified_split(root, val_fraction=0.1, seed=42, stratify_on=("label", "type")):
+    """NOTE: mixes every domain into train+val -- not a cross-domain test.
+    Use domain_holdout_split() / lodo_split() for that."""
     df = load_labels(root, "train")
     rng = np.random.default_rng(seed)
     val_ids: set[str] = set()
@@ -205,28 +177,113 @@ def stratified_split(
 
 
 def lodo_split(root: str | Path, val_doc_type: str) -> tuple[set[str], set[str]]:
-
     """Leave-One-Domain-Out: hold out one whole document ``type`` for validation.
 
-    Mirrors ``freuid-challenge``'s ``get_train_val_split``: all ids whose ``type`` equals
-    ``val_doc_type`` become validation, everything else is train. Train and val therefore
-    share NO document domain, so val AuDET measures cross-domain transfer (a more honest
-    proxy for the unseen-domain private test than the in-domain stratified split).
-
-    Returns ``(train_ids, val_ids)`` — the same shape as ``stratified_split`` so the
-    loaders are otherwise unchanged.
+    All ids whose ``type`` equals ``val_doc_type`` become validation, everything else
+    is train. Train and val therefore share NO document domain, so val AuDET measures
+    cross-domain transfer (a more honest proxy for the unseen-domain private test than
+    the in-domain stratified split). Validates both classes are present in the
+    held-out domain (AuDET/ROC-AUC is undefined on a single-class validation set).
     """
     df = load_labels(root, "train")
     types = set(df["type"].dropna())
     if val_doc_type not in types:
-        raise ValueError(
-            f"val_doc_type {val_doc_type!r} not found; available: {sorted(types)}"
-        )
+        raise ValueError(f"val_doc_type {val_doc_type!r} not found; available: {sorted(types)}")
     val_mask = df["type"] == val_doc_type
     val_labels = set(df.loc[val_mask, "label"])
     if val_labels != {0, 1}:
         raise ValueError(
-            f"held-out domain {val_doc_type!r} has labels {val_labels}; need both 0 and 1 "
-            "(AuDET / ROC-AUC is undefined on a single-class validation set)"
+            f"held-out domain {val_doc_type!r} has labels {val_labels}; need both 0 and 1"
         )
     return set(df.loc[~val_mask, "id"]), set(df.loc[val_mask, "id"])
+
+
+def domain_holdout_split(root, holdout_types):
+    """Leave-one-(or more)-domain-out: val = ids whose type is in holdout_types,
+    a domain the model never sees while training. Honest cross-domain check.
+
+    Equivalent in spirit to lodo_split() but accepts multiple held-out types at once
+    and doesn't enforce both-classes-present -- kept separate since train.py's
+    twostream path already depends on this exact signature."""
+    if isinstance(holdout_types, str):
+        holdout_types = [holdout_types]
+    holdout_set = set(holdout_types)
+    df = load_labels(root, "train")
+    known_types = set(df["type"].unique())
+    unknown = holdout_set - known_types
+    if unknown:
+        raise ValueError(f"holdout_types not found in data: {unknown} (known: {known_types})")
+    val_mask = df["type"].isin(holdout_set)
+    val_ids = set(df.loc[val_mask, "id"])
+    train_ids = set(df.loc[~val_mask, "id"])
+    if not val_ids or not train_ids:
+        raise ValueError("holdout split produced an empty train or val set")
+    return train_ids, val_ids
+
+
+def load_face_boxes(root):
+    path = Path(root) / "face_boxes.csv"
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path, dtype={"id": str})
+    return {r.id: (bool(r.detected), int(r.x), int(r.y), int(r.w), int(r.h))
+            for r in df.itertuples(index=False)}
+
+
+def crop_face(img, box):
+    detected, x, y, w, h = box
+    W, H = img.size
+    if not detected or w <= 0 or h <= 0:
+        side = min(W, H) // 3
+        cx, cy = W // 4, H // 2
+        return img.crop((max(0, cx - side), max(0, cy - side), cx + side, cy + side))
+    pad_w, pad_h = int(w * 0.3), int(h * 0.3)
+    left, top = max(0, x - pad_w), max(0, y - pad_h)
+    right, bottom = min(W, x + w + pad_w), min(H, y + h + pad_h)
+    return img.crop((left, top, right, bottom))
+
+
+def compute_ela(img, quality=90):
+    img = img.convert("RGB")
+    buf = BytesIO()
+    img.save(buf, "JPEG", quality=quality)
+    buf.seek(0)
+    resaved = Image.open(buf).convert("RGB")
+    diff = ImageChops.difference(img, resaved)
+    extrema = diff.getextrema()
+    max_diff = max(e[1] for e in extrema) or 1
+    return Image.eval(diff, lambda px: min(255, int(px * 255.0 / max_diff)))
+
+
+class TwoStreamDataset(Dataset):
+    def __init__(self, root, split="train", ids=None,
+                 full_transform=None, face_transform=None, ela_transform=None):
+        self.root = Path(root)
+        self.split = split
+        self.full_transform = full_transform
+        self.face_transform = face_transform
+        self.ela_transform = ela_transform
+        self.face_boxes = load_face_boxes(self.root)
+        df = load_labels(self.root, split)
+        if ids is not None:
+            df = df[df["id"].isin(ids)]
+        self.samples: list[Sample] = [
+            Sample(id=r.id, path=Path(r.path), label=int(r.label),
+                   is_digital=bool(r.is_digital) if pd.notna(r.is_digital) else None,
+                   type=r.type if pd.notna(r.type) else None)
+            for r in df.itertuples(index=False)
+        ]
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        s = self.samples[idx]
+        img = Image.open(s.path).convert("RGB")
+        box = self.face_boxes.get(s.id, (False, 0, 0, 0, 0))
+        face_img = crop_face(img, box)
+        ela_img = compute_ela(img)
+        full_t = self.full_transform(img) if self.full_transform else img
+        face_t = self.face_transform(face_img) if self.face_transform else face_img
+        ela_t = self.ela_transform(ela_img) if self.ela_transform else ela_img
+        return full_t, face_t, ela_t, s.label
