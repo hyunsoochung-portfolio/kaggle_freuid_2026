@@ -1,0 +1,95 @@
+# configs/finetune_v0.yaml
+# "Decisive experiment": S1's exact baseline_v1 recipe, but the backbone is a DINOv2 ViT-B/14
+# (timm tag, register tokens) fine-tuned END-TO-END instead of a frozen feature extractor.
+# De-confounds the S1->S2 comparison, which changed backbone AND trainability at once.
+#
+# Uses the model_type=baseline code path (timm.create_model + zero-init head) -- NOT the
+# frozen-backbone consistency path. DINOv2 via timm needs no HF token and timm handles
+# register tokens + pos-embed interpolation internally (dynamic_img_size=True, see
+# src/freuid/models/baseline.py).
+#
+# Everything below is IDENTICAL to baseline_v1.yaml except: backbone, image_size, tta scales,
+# and the new llrd/train_last_k_blocks/grad_checkpointing keys (see CLAUDE.md decisive-
+# experiment task). Confirmed via scripts/config_diff.py against baseline_v1.yaml.
+
+name: finetune_v0
+seed: 42
+data_dir: data
+
+# DINOv2 ViT-B/14 w/ 4 register tokens, timm tag (Apache-licensed, no HF gating).
+# Patch size 14 -> every input side / TTA scale must be a multiple of 14. Native res 518x518
+# (confirmed via timm.get_pretrained_cfg on the VESSL workspace: mean/std already equal the
+# ImageNet defaults this repo uses elsewhere, so no transform changes needed).
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size:
+  32 # unchanged from baseline_v1; see docs/finetune.md for whether
+  # this fit without train_last_k_blocks / grad_checkpointing fallback
+lr:
+  1.0e-4 # LLRD head/base LR (S1 used 2e-4; full fine-tune of a ViT needs a
+  # smaller base LR -- ambiguity resolved by using standard LLRD practice
+  # since baseline_v1's lr was tuned for a randomly-init CNN head only)
+weight_decay: 5.0e-2 # unchanged from baseline_v1
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  # Augmentation: print-and-capture pipeline (no flip) -- unchanged from baseline_v1
+  augment: recapture
+
+  # Synthetic tamper: 30% of bona-fide per batch become synthetic positives -- unchanged
+  synth_tamper_prob: 0.3
+
+  # Pairwise soft-AUC term -- unchanged
+  auc_loss_weight: 0.1
+
+  # Recapture probe: the compass -- unchanged
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  # Inference: TTA at three scales, multiples of patch_size=14 (476=14x34, 518=14x37,
+  # 560=14x40), rank-averaged, no flip. baseline_v1 used `tta: true` (auto [320,384,448]);
+  # here we pass an explicit list since the auto-scale step in infer.py rounds to multiples
+  # of 32, which is invalid for this patch14 backbone.
+  tta: [476, 518, 560]
+
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
+
+  # --- New for this experiment: layer-wise LR decay fine-tuning ---
+  # Gated block: absent/false in every other config, so this is fully additive.
+  llrd:
+    enabled: true
+    decay: 0.7 # per-block LR multiplier moving from head -> input
+    warmup_epochs:
+      2 # linear warmup, then cosine decay over the remaining epochs
+      # (baseline_v1 has no warmup at all -- see src/freuid/train.py;
+      # added only inside this gated LLRD path, S1 itself is unaffected)
+
+  # Fallback if full fine-tune doesn't fit batch_size=32: freeze all but the last k
+  # transformer blocks + head. null = full fine-tune (default for this run).
+  train_last_k_blocks: null
+
+  # torch gradient checkpointing on the ViT (model.set_grad_checkpointing) -- only turn on
+  # if needed to fit batch_size=32 in memory.
+  grad_checkpointing: false
+
+  # AMP (autocast + GradScaler), per CLAUDE.md's compute strategy -- train.py's shared
+  # run_epoch had no AMP path at all until this experiment (confirmed by reading it: no
+  # autocast anywhere), so baseline_v1 trained in plain FP32. A full-parameter ViT-B
+  # fine-tune at 518px in FP32 is too slow to finish 20 epochs in reasonable time on one
+  # A100 (confirmed via a single-batch timing diagnostic). Gated on extra.amp so every
+  # other config (including baseline_v1) is completely unaffected -- see run_epoch's
+  # scaler=None default in src/freuid/train.py.
+  amp: true

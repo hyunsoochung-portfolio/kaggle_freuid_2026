@@ -1,0 +1,40 @@
+# configs/baseline_v1_synth.yaml
+# S1 — adds synthetic-tamper augmentation on top of S0.
+# All other knobs are identical to baseline_v0 so the comparison is clean.
+
+name: baseline_v1_synth
+seed: 42
+data_dir: data
+
+backbone: tf_efficientnetv2_s.in21k
+pretrained: true
+image_size: 384
+
+epochs: 15
+batch_size: 64
+lr: 3.0e-4
+weight_decay: 1.0e-4
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  augment: recapture
+
+  # Synthetic-tamper: manufacture analog-fraud positives from bona-fide images.
+  # 30% of bona-fide samples per batch become synthetic positives (label=1),
+  # each with one random edit (copy-move, local-splice, or field-smudge)
+  # passed through recapture_transforms so the edit is seen through the analog hole.
+  synth_tamper_prob: 0.3
+
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID

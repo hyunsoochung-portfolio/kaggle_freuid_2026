@@ -9,6 +9,9 @@ competition metrics, and checkpoints the best AuDET to checkpoints/<name>.pt.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import math
+import random
 from pathlib import Path
 
 import torch
@@ -16,38 +19,61 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, stratified_split
+from freuid.data import FreuidDataset, lodo_split, stratified_split, unpack_batch
+from freuid.loss import combined_loss
 from freuid.metrics import evaluate
 from freuid.models import build_model
 from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
 
-def run_epoch(model, loader, device, criterion, optimizer=None):
+def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: float = 0.0, scaler=None):
     """One pass. With an optimizer it trains; without, it evaluates.
 
     Returns (mean_loss, scores, labels) where scores = P(fraud). In train mode the
     scores/labels are not collected (they would force a GPU->CPU sync every batch and
     are unused), so both are returned as None.
+
+    auc_weight > 0 adds a pairwise soft-AUC term to the BCE loss (train only).
+    auc_weight = 0.0 is bit-for-bit identical to plain BCE.
+
+    ``scaler`` (a ``torch.cuda.amp.GradScaler``) enables AMP (autocast + loss scaling)
+    when non-None and ``scaler.is_enabled()``; omitting it (the default for every
+    existing config) reproduces the original FP32 path exactly -- a disabled GradScaler
+    is a documented no-op passthrough for scale/step/update.
     """
     is_train = optimizer is not None
     model.train(is_train)
     total_loss, n_seen, all_scores, all_labels = 0.0, 0, [], []
-    for imgs, labels in tqdm(loader, leave=False):
+    use_amp = scaler is not None and scaler.is_enabled()
+    for batch in tqdm(loader, leave=False):
+        imgs, labels, face_meta = unpack_batch(batch)
         imgs = imgs.to(device)
-        targets = labels.float().unsqueeze(1).to(device)
+        labels_dev = labels.to(device)
+        face_meta_dev = face_meta.to(device) if face_meta is not None else None
         # eval 모드에서는 불필요한 그래디언트 계산을 끄는 컨텍스트 매니저
         with torch.set_grad_enabled(is_train):
-            # 모델 forward() 호출. imgs [B, 3, H, W] -> logits [B, 1] (B=batch_size)
-            logits = model(imgs)
-            # B개의 샘플에 대한 BCEWithLogitsLoss 계산. logits [B, 1], targets [B, 1] -> loss [1]
-            loss = criterion(logits, targets)
+            amp_ctx = (
+                torch.autocast(device_type="cuda", enabled=use_amp)
+                if device.type == "cuda" else contextlib.nullcontext()
+            )
+            with amp_ctx:
+                # 모델 forward() 호출. imgs [B, 3, H, W] -> logits [B, 1] (B=batch_size)
+                logits = model(imgs, face_meta_dev) if face_meta_dev is not None else model(imgs)
+                # BCE + optional pairwise AUC term (train only; val always uses plain BCE)
+                _aw = auc_weight if is_train else 0.0
+                loss = combined_loss(logits, labels_dev, criterion, _aw)
             if is_train:
                 optimizer.zero_grad()
-                loss.backward()
-                # 이 순간: model의 모든 파라미터 p에 대해 p.grad 가 채워짐 (기울기 계산 완료)
-                # 단, p 값(가중치) 자체는 아직 그대로
-                optimizer.step()
+                if use_amp:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    # 이 순간: model의 모든 파라미터 p에 대해 p.grad 가 채워짐 (기울기 계산 완료)
+                    # 단, p 값(가중치) 자체는 아직 그대로
+                    optimizer.step()
         bs = imgs.size(0)
         total_loss += loss.item() * bs
         n_seen += bs
@@ -55,24 +81,80 @@ def run_epoch(model, loader, device, criterion, optimizer=None):
             # logits [B, 1] -> scores [B] (P(fraud) in [0, 1]).
             # 나중에 이걸 다 모아 AuDET 계산(metrics.py)에 씀.
             all_scores.append(torch.sigmoid(logits).squeeze(1).float().cpu())
-            all_labels.append(labels)
+            all_labels.append(labels_dev.cpu())
     mean_loss = total_loss / max(n_seen, 1)
     if is_train:
         return mean_loss, None, None
     return mean_loss, torch.cat(all_scores).numpy(), torch.cat(all_labels).numpy()
 
 
-def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
-    train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+def _split_ids(cfg: Config) -> tuple[set[str], set[str]]:
+    """Train/val id split: Leave-One-Domain-Out if val_doc_type is set, else stratified."""
+    if cfg.val_doc_type:
+        return lodo_split(cfg.data_dir, cfg.val_doc_type)
+    return stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
+
+
+def build_loaders(
+    cfg: Config, data_cfg: dict
+) -> tuple[DataLoader, DataLoader, DataLoader | None]:
+    # model_type dispatch: add new model types here (e.g. model_type="consistency")
+    train_ids, val_ids = _split_ids(cfg)
     if cfg.limit:
         # deterministic subset (sorted by id) for fast dev/smoke runs
         train_ids = set(sorted(train_ids)[: cfg.limit])
         val_ids = set(sorted(val_ids)[: max(1, cfg.limit // 5)])
     size, mean, std = data_cfg["image_size"], data_cfg["mean"], data_cfg["std"]
-    train_tf = build_transforms(size, True, mean, std)
+    augment = cfg.extra.get("augment")
+    train_tf = build_transforms(size, True, mean, std, augment=augment)
     val_tf = build_transforms(size, False, mean, std)
-    train_ds = FreuidDataset(cfg.data_dir, "train", train_tf, ids=train_ids)
-    val_ds = FreuidDataset(cfg.data_dir, "train", val_tf, ids=val_ids)
+
+    # Regions cache: used when extra.use_rectify=True (consistency path with card rectification).
+    _rdir: Path | None = None
+    if cfg.extra.get("use_rectify", False):
+        from freuid.preprocess import regions_dir as _get_rdir
+        _rdir = _get_rdir(cfg.data_dir)
+        if _rdir.exists():
+            print(f"[train] use_rectify=True → loading from {_rdir}")
+        else:
+            print(f"[train] WARNING: use_rectify=True but cache not found at {_rdir}; using raw images")
+            _rdir = None
+
+    # Face-region head needs (id, valid) face boxes alongside each batch. Only the
+    # consistency path knows how to consume the extra tensor, so gate on model_type too.
+    model_type = cfg.extra.get("model_type", "baseline")
+    return_face_meta = model_type == "consistency" and bool(cfg.extra.get("use_face_region", False))
+
+    synth_prob = float(cfg.extra.get("synth_tamper_prob", 0.0))
+    if synth_prob > 0.0:
+        from freuid.augment import SynthTamperWrapper, recapture_transforms
+        _base_train_ds = FreuidDataset(
+            cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir,
+            return_face_meta=return_face_meta,
+        )
+        _tamper_tf = recapture_transforms(size, mean, std)
+        train_ds = SynthTamperWrapper(
+            _base_train_ds,
+            clean_transform=train_tf,
+            tamper_transform=_tamper_tf,
+            prob=synth_prob,
+            seed=cfg.seed,
+        )
+        _n_bona = sum(1 for s in _base_train_ds.samples if s.label == 0)
+        print(
+            f"[train] synth_tamper: prob={synth_prob:.2f} "
+            f"| {_n_bona} bona-fide → ~{int(_n_bona * synth_prob)} synthetic positives/epoch "
+            f"| donor_pool={len(train_ds._donor_pool)}"
+        )
+    else:
+        train_ds = FreuidDataset(
+            cfg.data_dir, "train", train_tf, ids=train_ids, regions_dir=_rdir,
+            return_face_meta=return_face_meta,
+        )
+    val_ds = FreuidDataset(
+        cfg.data_dir, "train", val_tf, ids=val_ids, regions_dir=_rdir,
+        return_face_meta=return_face_meta,
+    )
     pin_memory = torch.cuda.is_available()  # unsupported/no-op on MPS, only helps CUDA
     train_loader = DataLoader(
         train_ds, batch_size=cfg.batch_size, shuffle=True,
@@ -97,51 +179,217 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
     #     imgs:   FloatTensor [B, 3, H, W]   (B=batch_size, 마지막 배치는 drop_last로 버려져 항상 B)
     #     labels: LongTensor  [B]            (각 0/1)
     # 예) batch_size=32, image_size=384 -> imgs [32, 3, 384, 384], labels [32]
-    return train_loader, val_loader
+
+    # Recapture probe: same val ids, recapture augmentation, deterministic per-epoch seed.
+    # num_workers=0 so numpy/random seeding in the main process controls augmentation.
+    probe_loader: DataLoader | None = None
+    if cfg.extra.get("use_recapture_probe"):
+        from freuid.augment import recapture_transforms
+        probe_tf = recapture_transforms(size, mean, std)
+        probe_ds = FreuidDataset(
+            cfg.data_dir, "train", probe_tf, ids=val_ids, regions_dir=_rdir,
+            return_face_meta=return_face_meta,
+        )
+        probe_loader = DataLoader(
+            probe_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0,
+        )
+
+    return train_loader, val_loader, probe_loader
+
+
+def _run_probe(model, probe_loader, device, criterion, seed: int, scaler=None) -> dict[str, float]:
+    """Evaluate the degraded probe with a fixed seed so augmentation is the same each epoch."""
+    import numpy as np
+    random.seed(seed)
+    np.random.seed(seed)
+    _, scores, labels = run_epoch(model, probe_loader, device, criterion, scaler=scaler)
+    return evaluate(scores, labels)
+
+
+def _check_init_loss(model, loader, device, criterion, tol: float = 0.3) -> None:
+    """Assert that BCE on the first train batch ≈ ln(2) before any weight update.
+
+    A fresh classifier head (bias=0, small weights) outputs logits ≈ 0, so
+    sigmoid → 0.5 and BCE → ln(2) ≈ 0.693 on any class mix. Failing this usually
+    means labels are on the wrong scale, the head bias was initialised incorrectly,
+    or the loss function is mis-wired.
+    """
+    model.eval()
+    imgs, labels, face_meta = unpack_batch(next(iter(loader)))
+    with torch.no_grad():
+        imgs = imgs.to(device)
+        logits = model(imgs, face_meta.to(device)) if face_meta is not None else model(imgs)
+        loss = criterion(logits, labels.float().unsqueeze(1).to(device)).item()
+    model.train()
+    expected = math.log(2)  # ≈ 0.693
+    assert abs(loss - expected) < tol, (
+        f"init BCE={loss:.4f} expected ≈{expected:.4f} (tol={tol}). "
+        "Check: labels not shuffled/inverted, loss not pre-averaged with wrong sign, "
+        "head bias not set to a constant."
+    )
+    print(f"[sanity] init BCE={loss:.4f} ~= ln2={expected:.4f} (tol={tol}) OK")
+
+
+def _sanity_overfit(model, loader, device, criterion, steps: int = 100, target: float = 0.02) -> None:
+    """Overfit a single batch to near-zero loss; asserts the forward+backward path works.
+
+    Runs on a COPY of the model so the real training weights are untouched.
+    Uses SGD (no momentum) so convergence is purely the model's capacity.
+    """
+    import copy
+    m = copy.deepcopy(model)
+    imgs, labels, face_meta = unpack_batch(next(iter(loader)))
+    imgs = imgs.to(device)
+    face_meta = face_meta.to(device) if face_meta is not None else None
+    targets = labels.float().unsqueeze(1).to(device)
+    opt = torch.optim.SGD(m.parameters(), lr=0.1)
+    m.train()
+
+    def _forward():
+        return m(imgs, face_meta) if face_meta is not None else m(imgs)
+
+    for _ in range(steps):
+        opt.zero_grad()
+        criterion(_forward(), targets).backward()
+        opt.step()
+    final = criterion(_forward(), targets).item()
+    assert final < target, (
+        f"sanity overfit: loss={final:.4f} after {steps} steps (target <{target}). "
+        "Check: gradient flow not blocked, model has enough capacity for one batch."
+    )
+    print(f"[sanity] single-batch overfit: loss={final:.6f} after {steps} steps OK")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--sanity", action="store_true",
+        help="run init-loss check + single-batch overfit check, then exit",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="cap train/val dataset sizes for quick smoke runs",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.limit is not None:
+        cfg.limit = args.limit
     seed_everything(cfg.seed)
     device = pick_device()
-    # Pull normalization + input size from the backbone itself (cfg.image_size overrides
-    # the native resolution when set) so preprocessing always matches the pretrained model.
     data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
     print(
         f"[train] config '{cfg.name}' | device={device} | backbone={cfg.backbone} | "
         f"image_size={data_cfg['image_size']} mean={data_cfg['mean']}"
     )
 
-    train_loader, val_loader = build_loaders(cfg, data_cfg)
+    train_loader, val_loader, probe_loader = build_loaders(cfg, data_cfg)
     print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
+    if probe_loader is not None:
+        print(f"[train] probe={len(probe_loader.dataset)} (recapture, seed={cfg.extra.get('recapture_probe_seed', 0)})")
 
-    model = build_model(cfg.backbone, cfg.pretrained).to(device)
+    # model_type dispatch: add new model types here (e.g. model_type="consistency")
+    model_type = cfg.extra.get("model_type", "baseline")
+    if model_type == "consistency":
+        from freuid.models import build_consistency_model
+        model = build_consistency_model(cfg).to(device)
+    else:
+        model = build_model(cfg.backbone, cfg.pretrained).to(device)
+        # Fine-tuning knobs (baseline/ViT path only; frozen consistency path untouched).
+        train_last_k = cfg.extra.get("train_last_k_blocks")
+        if train_last_k is not None:
+            from freuid.optim import freeze_all_but_last_k_blocks
+            freeze_all_but_last_k_blocks(model, int(train_last_k))
+        if cfg.extra.get("grad_checkpointing", False):
+            if hasattr(model, "set_grad_checkpointing"):
+                model.set_grad_checkpointing(True)
+                print("[train] gradient checkpointing enabled")
+            else:
+                print(f"[train] WARNING: grad_checkpointing=True but {cfg.backbone} has no set_grad_checkpointing")
     criterion = torch.nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+
+    # Always check init loss before any weight updates.
+    _check_init_loss(model, train_loader, device, criterion)
+
+    if args.sanity:
+        _sanity_overfit(model, train_loader, device, criterion)
+        print("[sanity] all checks passed — exiting")
+        return
+
+    llrd_cfg = cfg.extra.get("llrd") or {}
+    if llrd_cfg.get("enabled", False):
+        from freuid.optim import build_llrd_param_groups, build_warmup_cosine_scheduler
+        param_groups = build_llrd_param_groups(
+            model, base_lr=cfg.lr, weight_decay=cfg.weight_decay,
+            decay=float(llrd_cfg.get("decay", 0.7)),
+        )
+        optimizer = torch.optim.AdamW(param_groups)
+        scheduler = build_warmup_cosine_scheduler(
+            optimizer, cfg.epochs, warmup_epochs=int(llrd_cfg.get("warmup_epochs", 2)),
+        )
+    else:
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
+        # Cosine decay over the run: anneals LR toward 0 by the final epoch. Helps the
+        # pretrained RGB backbone settle rather than oscillating at a flat LR.
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
+
+    auc_weight = float(cfg.extra.get("auc_loss_weight", 0.0))
+    if auc_weight > 0.0:
+        print(f"[train] auc_loss_weight={auc_weight} (pairwise soft-AUC term active)")
+
+    # AMP: disabled GradScaler is a documented no-op passthrough, so this is safe to
+    # always construct and thread through run_epoch -- every config without
+    # extra.amp=True gets scaler.is_enabled()==False and reproduces the exact FP32 path.
+    amp_enabled = bool(cfg.extra.get("amp", False)) and device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled) if device.type == "cuda" else None
+    if amp_enabled:
+        print("[train] AMP enabled (autocast + GradScaler)")
+
+    # Checkpoint criterion: "probe_audet" (recapture compass) or "audet" (in-domain).
+    # Ties on the primary metric are broken by the matching APCER@1%BPCER (secondary
+    # competition metric) so two epochs with identical AuDET don't checkpoint arbitrarily.
+    ckpt_key = cfg.extra.get("checkpoint_metric", "audet")
+    tie_key = {"probe_audet": "probe_apcer_at_1pct_bpcer", "audet": "apcer_at_1pct_bpcer"}.get(ckpt_key)
+    probe_seed = cfg.extra.get("recapture_probe_seed", 0)
 
     Path("checkpoints").mkdir(exist_ok=True)
-    best_audet = float("inf")
+    best_metric = float("inf")
+    best_tiebreak = float("inf")
     for epoch in range(1, cfg.epochs + 1):
-        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer)
-        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion)
+        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer, auc_weight, scaler=scaler)
+        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion, scaler=scaler)
         m = evaluate(val_scores, val_labels)
+        last_lrs = scheduler.get_last_lr()
+        lr = last_lrs[0] if len(last_lrs) == 1 else max(last_lrs)
+        scheduler.step()
+
+        probe_str = ""
+        if probe_loader is not None:
+            pm = _run_probe(model, probe_loader, device, criterion, probe_seed, scaler=scaler)
+            m["probe_audet"] = pm["audet"]
+            m["probe_apcer_at_1pct_bpcer"] = pm["apcer_at_1pct_bpcer"]
+            probe_str = f" probe_AuDET={m['probe_audet']:.6f}"
+
+        lr_str = f"lr={lr:.2e}" if len(last_lrs) == 1 else f"lr_head={lr:.2e} lr_min={min(last_lrs):.2e}"
         print(
-            f"epoch {epoch:>2}: train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-            f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}"
+            f"\n[epoch {epoch:>2}/{cfg.epochs}] {lr_str} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+            f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}{probe_str}"
         )
-        if m["audet"] < best_audet:
-            best_audet = m["audet"]
+
+        current = m.get(ckpt_key, m["audet"])
+        current_tie = m.get(tie_key, float("inf")) if tie_key else float("inf")
+        improved = current < best_metric or (current == best_metric and current_tie < best_tiebreak)
+        if improved:
+            best_metric = current
+            best_tiebreak = current_tie
             ckpt = Path("checkpoints") / f"{cfg.name}.pt"
-            # model 가중치 + config + epoch + metrics를 한 딕셔너리로 저장 (checkpoints/<name>.pt)
             torch.save(
                 {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
                 ckpt,
             )
-            print(f"  ↳ saved {ckpt} (AuDET={best_audet:.4f})")
+            print(f"  -> saved {ckpt} ({ckpt_key}={best_metric:.6f})")
 
 
 if __name__ == "__main__":

@@ -234,7 +234,22 @@ wandb/
 kaggle.json
 .env
 .env.*
+!.env.example
+*.pem
 
 # smoke-test mini dataset (not for VCS)
 data_smoke/
 data_smoke_*.zip
+
+# reports/: internal analysis artifacts derived from the proprietary dataset (large
+# per-image CSVs, figures, notes) -- not used by the training/inference pipeline, kept
+# locally only
+reports/
+
+# internal-only planning docs and the old report/ placeholder -- kept locally only
+REMOVED.md
+ROADMAP.md
+report/
+
+# synthetic tamper sample images generated during dev/testing -- kept locally only
+synth_samples/

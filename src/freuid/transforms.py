@@ -40,7 +40,12 @@ def build_transforms(
     train: bool = False,
     mean: tuple[float, float, float] = IMAGENET_MEAN,
     std: tuple[float, float, float] = IMAGENET_STD,
+    augment: str | None = None,
 ):
+    if train and augment == "recapture":
+        from freuid.augment import recapture_transforms
+        return recapture_transforms(image_size, mean, std)
+
     steps = [transforms.Resize((image_size, image_size))]
     if train:
         steps += [
@@ -56,4 +61,3 @@ def build_transforms(
 #          for t in self.transforms:             # 부품을 순서대로
 #              img = t(img)                       # 출력이 다음 입력으로
 #          return img
-
