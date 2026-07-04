@@ -150,6 +150,11 @@ def _run_training(cfg: Config, data_cfg: dict, device, batch_size: int) -> None:
     ).to(device)
     if cfg.grad_checkpointing and hasattr(model, "set_grad_checkpointing"):
         model.set_grad_checkpointing()  # recompute activations in backward → big memory saving
+    if cfg.compile:
+        try:
+            model = torch.compile(model)  # JIT graph fusion; ~1.3-2x on ViT
+        except Exception as e:  # best-effort: fall back to eager if compile isn't available
+            print(f"[train] torch.compile failed ({e}); running eager")
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # optimizer: LLRD → earlier layers get a smaller LR (llrd_param_groups); else one uniform group.
@@ -184,8 +189,10 @@ def _run_training(cfg: Config, data_cfg: dict, device, batch_size: int) -> None:
             best_audet = m["audet"]
             ckpt = Path("checkpoints") / f"{cfg.name}.pt"
             # model 가중치 + config + epoch + metrics를 한 딕셔너리로 저장 (checkpoints/<name>.pt)
+            # torch.compile 로 감싸면 state_dict 키에 '_orig_mod.' 가 붙으므로 원본을 꺼내 저장.
+            state = getattr(model, "_orig_mod", model).state_dict()
             torch.save(
-                {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
+                {"model": state, "config": vars(cfg), "epoch": epoch, "metrics": m},
                 ckpt,
             )
             print(f"  ↳ saved {ckpt} (AuDET={best_audet:.4f})")

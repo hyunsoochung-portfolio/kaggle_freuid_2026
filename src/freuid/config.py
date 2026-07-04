@@ -39,6 +39,7 @@ class Config:
     # fine-tuning recipe (all default to OFF so existing configs behave exactly as before)
     amp: bool = False  # mixed precision (only takes effect on CUDA); big speed/memory win for ViT
     grad_checkpointing: bool = False  # recompute activations in backward; ~half memory (for 518)
+    compile: bool = False  # torch.compile the model (~1.3-2x on ViT); falls back to eager on error
     warmup_epochs: float = 0.0  # >0 → linear LR warmup then cosine decay; 0 → constant LR
     lr_min: float = 0.0  # cosine floor (absolute LR at the end of training)
     llrd_decay: float | None = None  # layer-wise LR decay factor (e.g. 0.75); None = uniform LR
