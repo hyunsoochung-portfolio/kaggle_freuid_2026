@@ -105,7 +105,14 @@ def build_loaders(
         train_ids = set(sorted(train_ids)[: cfg.limit])
         val_ids = set(sorted(val_ids)[: max(1, cfg.limit // 5)])
     size, mean, std = data_cfg["image_size"], data_cfg["mean"], data_cfg["std"]
-    augment = cfg.extra.get("augment")
+    # extra.recapture (default True) gates the print-and-recapture chain everywhere it's
+    # wired in below -- both the plain train transform (via `augment`) and the tamper
+    # wrapper's tamper_transform (otherwise hardcoded to recapture_transforms). Default
+    # True reproduces every existing config's behavior exactly; set False (e.g.
+    # configs/ablate_no_recapture.yaml) to route ALL training samples through the clean
+    # transform instead, for the recapture A/B ablation.
+    recapture_enabled = bool(cfg.extra.get("recapture", True))
+    augment = cfg.extra.get("augment") if recapture_enabled else None
     train_tf = build_transforms(size, True, mean, std, augment=augment)
     val_tf = build_transforms(size, False, mean, std)
 
@@ -132,7 +139,11 @@ def build_loaders(
             cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir,
             return_face_meta=return_face_meta,
         )
-        _tamper_tf = recapture_transforms(size, mean, std)
+        # Tampered samples must be seen "through the analog hole" whenever recapture is
+        # enabled (unchanged from every existing config). When recapture is disabled for
+        # the A/B ablation, route them through the same clean transform as everything
+        # else instead -- same tamper types/probability/blending, just no degradation.
+        _tamper_tf = recapture_transforms(size, mean, std) if recapture_enabled else train_tf
         train_ds = SynthTamperWrapper(
             _base_train_ds,
             clean_transform=train_tf,

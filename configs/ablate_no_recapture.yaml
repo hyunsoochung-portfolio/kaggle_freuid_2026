@@ -1,0 +1,77 @@
+# configs/ablate_no_recapture.yaml
+# Arm B of the recapture A/B test (reports/ab_recapture/README.md). Identical recipe to
+# configs/finetune_v0.yaml (arm A / control) except the print-and-recapture chain is
+# disabled via the new extra.recapture gate (src/freuid/train.py) -- everything else
+# (seed, epochs, LR/LLRD/warmup, batch size, image size, TTA scales, synth tamper prob)
+# is unchanged. Verify with:
+#   python scripts/config_diff.py configs/finetune_v0.yaml configs/ablate_no_recapture.yaml
+# The only acceptable diffs are `name` and `extra.recapture`/`extra.use_recapture_probe`
+# derived keys -- see step0_audit.md for why probe_v1 (use_recapture_probe) still needs
+# to run for arm B (it's a measurement, not training).
+#
+# extra.recapture: false does two things in src/freuid/train.py's build_loaders():
+#   1. train_tf uses the plain resize+normalize clean transform (extra.augment is
+#      ignored, forced to None) instead of recapture_transforms.
+#   2. SynthTamperWrapper's tamper_transform is that SAME clean transform instead of a
+#      hardcoded recapture_transforms call -- so synthetic-tamper positives are still
+#      generated (copy_move/field_smudge/local_splice, same 0.3 probability, same
+#      blending) but are no longer routed through the analog-degradation chain.
+# use_recapture_probe stays true: probe_v1 must still be measured every epoch for arm B
+# (it's the instrument this whole ablation is checking against), even though arm B
+# doesn't train with that augmentation.
+
+name: ablate_no_recapture
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size:
+  32
+lr:
+  1.0e-4
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  # --- The ablation switch: recapture OFF, everything else unchanged from finetune_v0 ---
+  recapture: false
+  augment: recapture   # ignored while recapture=false (forced to None in train.py); kept
+                        # identical to finetune_v0.yaml so config_diff.py's only reported
+                        # diff is the `recapture` key itself, not this one too.
+
+  synth_tamper_prob: 0.3
+
+  auc_loss_weight: 0.1
+
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  tta: [476, 518, 560]
+
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
+
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs:
+      2
+
+  train_last_k_blocks: null
+
+  grad_checkpointing: false
+
+  amp: true
