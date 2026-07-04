@@ -265,3 +265,49 @@ class SynthTamperWrapper(Dataset):
         if self._return_face_meta:
             return img_pil, label, face_meta_tensor(sample, img_size)
         return img_pil, label
+
+
+class SynthTamperDataset(Dataset):
+    """Standalone dataset of synthetic-tamper examples built from a base dataset's
+    bona-fide samples -- ALWAYS tampers (unlike SynthTamperWrapper, which relabels
+    a fraction of bona-fide samples in place, keeping the same total length).
+
+    Meant to be concatenated with the original dataset (torch.utils.data.ConcatDataset)
+    to literally double the training data: original N samples + N synthetic-fraud
+    samples generated from the bona-fide subset.
+    """
+
+    def __init__(self, base: Dataset, tamper_transform, seed: int = 0) -> None:
+        self.tamper_tf = tamper_transform
+        self._rng = np.random.default_rng(seed)
+        self._return_face_meta = getattr(base, "_return_face_meta", False)
+        self.samples = [s for s in getattr(base, "samples", []) if s.label == 0]
+
+        donor_paths: list[Path] = [
+            s.card_path if s.card_path is not None else s.path
+            for s in self.samples
+        ]
+        self._rng.shuffle(donor_paths)  # type: ignore[arg-type]
+        self._donor_pool: list[np.ndarray] = []
+        for p in donor_paths[:_MAX_DONOR_POOL]:
+            try:
+                self._donor_pool.append(np.array(Image.open(p).convert("RGB")))
+            except Exception:
+                pass
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        sample = self.samples[idx]
+        src = sample.card_path if sample.card_path is not None else sample.path
+        img_pil = Image.open(src).convert("RGB")
+        arr = np.array(img_pil)
+        donor = None
+        if self._donor_pool:
+            donor = self._donor_pool[int(self._rng.integers(len(self._donor_pool)))]
+        tampered, _ = synth_tamper(arr, self._rng, donor)
+        img_out = self.tamper_tf(Image.fromarray(tampered))
+        if self._return_face_meta:
+            return img_out, 1, torch.zeros(FACE_META_DIM, dtype=torch.float32)
+        return img_out, 1

@@ -160,8 +160,23 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader, 
     model_type = cfg.extra.get("model_type", "baseline")
     return_face_meta = model_type == "consistency" and bool(cfg.extra.get("use_face_region", False))
 
+    synth_double = bool(cfg.extra.get("synth_tamper_double", False))
     synth_prob = float(cfg.extra.get("synth_tamper_prob", 0.0))
-    if synth_prob > 0.0:
+    if synth_double:
+        from torch.utils.data import ConcatDataset
+        from freuid.augment import SynthTamperDataset, recapture_transforms
+        _base_train_ds = FreuidDataset(
+            cfg.data_dir, "train", train_tf, ids=train_ids, regions_dir=_rdir,
+            return_face_meta=return_face_meta,
+        )
+        _tamper_tf = recapture_transforms(size, mean, std)
+        _synth_ds = SynthTamperDataset(_base_train_ds, tamper_transform=_tamper_tf, seed=cfg.seed)
+        train_ds = ConcatDataset([_base_train_ds, _synth_ds])
+        print(
+            f"[train] synth_tamper_double: {len(_base_train_ds)} original + "
+            f"{len(_synth_ds)} synthetic (from bona-fide) = {len(train_ds)} total/epoch"
+        )
+    elif synth_prob > 0.0:
         from freuid.augment import SynthTamperWrapper, recapture_transforms
         _base_train_ds = FreuidDataset(
             cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir,

@@ -1,0 +1,14 @@
+name: yuri_synth_double_smoke
+seed: 42
+data_dir: data
+image_size: 384
+val_fraction: 0.1
+backbone: tf_efficientnetv2_s.in21k
+pretrained: true
+epochs: 1
+batch_size: 16
+lr: 0.0003
+weight_decay: 0.0001
+num_workers: 4
+limit: 200
+synth_tamper_double: true
