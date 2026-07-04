@@ -28,7 +28,7 @@ num_workers: 8
 # fine-tuning recipe
 amp: true                  # mixed precision (CUDA only); flash attention (SDPA) is on by default
 compile: true              # torch.compile for ~1.3-2x speedup (falls back to eager on error)
-grad_checkpointing: true   # recompute activations in backward — the key to fitting 518 in 80GB
+grad_checkpointing: false  # off: 518 fits easily (saw ~6GB/80GB used); ~25% faster. flip on if OOM
 warmup_epochs: 1.0         # linear warmup then cosine decay
 lr_min: 0.000001           # cosine floor
 llrd_decay: 0.75           # layer-wise LR decay factor
