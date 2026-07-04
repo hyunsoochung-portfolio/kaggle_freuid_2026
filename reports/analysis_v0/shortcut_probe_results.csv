@@ -1,3 +1,0 @@
-model,audet,apcer_at_1pct_bpcer
-LogisticRegression,0.24933637137989784,0.8166950596252129
-HistGradientBoostingClassifier,0.10451511925042578,0.4272572402044293
