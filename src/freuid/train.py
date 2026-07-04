@@ -75,7 +75,7 @@ def run_epoch(model, loader, device, criterion, optimizer=None, scheduler=None, 
     return mean_loss, torch.cat(all_scores).numpy(), torch.cat(all_labels).numpy()
 
 
-def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
+def build_loaders(cfg: Config, data_cfg: dict, batch_size: int) -> tuple[DataLoader, DataLoader]:
     if cfg.val_types:  # cross-domain: hold out whole document types as validation
         train_ids, val_ids = domain_holdout_split(cfg.data_dir, cfg.val_types)
     else:
@@ -91,11 +91,11 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
     val_ds = FreuidDataset(cfg.data_dir, "train", val_tf, ids=val_ids)
     pin_memory = torch.cuda.is_available()  # unsupported/no-op on MPS, only helps CUDA
     train_loader = DataLoader(
-        train_ds, batch_size=cfg.batch_size, shuffle=True,
+        train_ds, batch_size=batch_size, shuffle=True,
         num_workers=cfg.num_workers, pin_memory=pin_memory, drop_last=True,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers,
+        val_ds, batch_size=batch_size, shuffle=False, num_workers=cfg.num_workers,
     )
 
     # DataLoader가 for문을 돌 때 막후에서 하는 일 (개념 코드):
@@ -138,28 +138,18 @@ def build_scheduler(optimizer, cfg: Config, steps_per_epoch: int):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    args = parser.parse_args()
-
-    cfg = load_config(args.config)
-    seed_everything(cfg.seed)
-    device = pick_device()
-    # Pull normalization + input size from the backbone itself (cfg.image_size overrides
-    # the native resolution when set) so preprocessing always matches the pretrained model.
-    data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
-    print(
-        f"[train] config '{cfg.name}' | device={device} | backbone={cfg.backbone} | "
-        f"image_size={data_cfg['image_size']} mean={data_cfg['mean']}"
-    )
-
-    train_loader, val_loader = build_loaders(cfg, data_cfg)
-    print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
+def _run_training(cfg: Config, data_cfg: dict, device, batch_size: int) -> None:
+    """One full training run at a given batch size. main() retries this with a smaller
+    batch on CUDA OOM (the GPU/VESSL do NOT auto-manage memory — 80GB is a hard wall)."""
+    train_loader, val_loader = build_loaders(cfg, data_cfg, batch_size)
+    print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)} "
+          f"batch={batch_size}")
 
     model = build_model(
         cfg.backbone, cfg.pretrained, cfg.head_dropout, cfg.pool, data_cfg["image_size"]
     ).to(device)
+    if cfg.grad_checkpointing and hasattr(model, "set_grad_checkpointing"):
+        model.set_grad_checkpointing()  # recompute activations in backward → big memory saving
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # optimizer: LLRD → earlier layers get a smaller LR (llrd_param_groups); else one uniform group.
@@ -174,8 +164,8 @@ def main() -> None:
     scheduler = build_scheduler(optimizer, cfg, steps_per_epoch=len(train_loader))
     print(
         f"[train] amp={use_amp} llrd={cfg.llrd_decay} warmup_epochs={cfg.warmup_epochs} "
-        f"lr={cfg.lr} groups={len(optimizer.param_groups)} "
-        f"head_dropout={cfg.head_dropout} pool={cfg.pool}"
+        f"lr={cfg.lr} groups={len(optimizer.param_groups)} head_dropout={cfg.head_dropout} "
+        f"pool={cfg.pool} grad_ckpt={cfg.grad_checkpointing}"
     )
 
     Path("checkpoints").mkdir(exist_ok=True)
@@ -199,6 +189,37 @@ def main() -> None:
                 ckpt,
             )
             print(f"  ↳ saved {ckpt} (AuDET={best_audet:.4f})")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    seed_everything(cfg.seed)
+    device = pick_device()
+    # Pull normalization + input size from the backbone itself (cfg.image_size overrides
+    # the native resolution when set) so preprocessing always matches the pretrained model.
+    data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
+    print(
+        f"[train] config '{cfg.name}' | device={device} | backbone={cfg.backbone} | "
+        f"image_size={data_cfg['image_size']} mean={data_cfg['mean']}"
+    )
+
+    # Retry with a smaller batch on CUDA OOM. grad_checkpointing (config) is the main defense;
+    # this loop just self-corrects if the batch guess is still too big for 80GB.
+    batch_size = cfg.batch_size
+    while True:
+        try:
+            _run_training(cfg, data_cfg, device, batch_size)
+            return
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if batch_size <= 4:
+                raise
+            batch_size //= 2
+            print(f"[oom] CUDA out of memory — retrying with batch_size={batch_size}")
 
 
 if __name__ == "__main__":

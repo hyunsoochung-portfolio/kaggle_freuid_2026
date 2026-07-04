@@ -1,12 +1,14 @@
-# DINOv2 ViT-B/14 full fine-tune with the recipe that wins on this task:
+# DINOv2 ViT-B/14 full fine-tune at native 518px — the recipe that wins on this task:
 # strong self-supervised backbone + LLRD + warmup/cosine + AMP + low LR.
+# 518 keeps the fine, high-frequency detail that document-forgery cues live in.
+# grad_checkpointing + the OOM auto-fallback in train.py make it fit an 80GB A100.
 # No cross-domain holdout — plain random split, so we train on all document types.
 name: dinov2_v1
 seed: 42
 
 # data
 data_dir: data
-image_size: 224            # patch14 → must be a multiple of 14 (224 = 14*16); native is 518
+image_size: 518            # native DINOv2 resolution (patch14 → 518 = 14*37)
 val_fraction: 0.1          # random stratified split (val_types removed → uses all domains)
 
 # model
@@ -16,14 +18,15 @@ head_dropout: 0.1          # dropout before the linear head
 pool: avg                  # mean-pool patch tokens (vs CLS-only) — better for spread-out artifacts
 
 # train
-epochs: 8
-batch_size: 64
-lr: 0.0001                 # top-group base LR; LLRD gives lower layers a smaller LR
+epochs: 6
+batch_size: 32             # per-step size; train.py auto-halves on OOM (16→8…)
+lr: 0.00005                # base (top-group) LR; lower than the 224 plan — smaller batch, harder task
 weight_decay: 0.05
 num_workers: 8
 
 # fine-tuning recipe
 amp: true                  # mixed precision (CUDA only)
+grad_checkpointing: true   # recompute activations in backward — the key to fitting 518 in 80GB
 warmup_epochs: 1.0         # linear warmup then cosine decay
 lr_min: 0.000001           # cosine floor
 llrd_decay: 0.75           # layer-wise LR decay factor
