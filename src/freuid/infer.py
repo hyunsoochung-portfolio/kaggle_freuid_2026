@@ -117,7 +117,12 @@ def predict_scores_tta(
             sample_ids = [s.id for s in ds.samples]
         scores = predict_scores(model, loader, device)
         per_scale_scores.append(scores)
-        print(f"[tta] scale={scale}  scores: min={min(scores):.4f} max={max(scores):.4f}")
+        # guard min()/max() on empty scores (no test images present locally) — the rest of the
+        # TTA path already handles empty gracefully, so every id just falls back to missing_id_score
+        if scores:
+            print(f"[tta] scale={scale}  scores: min={min(scores):.4f} max={max(scores):.4f}")
+        else:
+            print(f"[tta] scale={scale}  0 present ids")
 
     # Rank-average across scales
     import numpy as np

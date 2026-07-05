@@ -181,8 +181,3 @@ def load_backbone(backbone_name: str) -> _FeatureWrapper:
         raw, int(patch_size), int(embed_dim), backend=backend,
         num_register_tokens=num_register_tokens,
     )
-
-
-def embed_dim_for(backbone_name: str) -> int:
-    """CLS token dimension for a given backbone name."""
-    return _EMBED_DIM.get(backbone_name, 768)

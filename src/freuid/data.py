@@ -71,8 +71,6 @@ def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
         for col in ("is_digital", "type"):
             df[col] = df.get(col)
     return df
-#[id, image_path, label, path, is_digital, type] tables are used in 
-#train/val/test splits, and the path column is used to load images. 
 
 
 def unpack_batch(batch):
@@ -205,7 +203,6 @@ def stratified_split(
 
 
 def lodo_split(root: str | Path, val_doc_type: str) -> tuple[set[str], set[str]]:
-
     """Leave-One-Domain-Out: hold out one whole document ``type`` for validation.
 
     Mirrors ``freuid-challenge``'s ``get_train_val_split``: all ids whose ``type`` equals

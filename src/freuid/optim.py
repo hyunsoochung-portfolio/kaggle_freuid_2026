@@ -53,8 +53,8 @@ def build_llrd_param_groups(
     """Per-block layer-wise-LR-decay param groups for AdamW.
 
     Groups by transformer depth: head/final-norm at ``base_lr``, block ``i`` at
-    ``base_lr * decay**(num_blocks - i)``, patch embed / pos embed / cls / register
-    tokens at the deepest-decayed rate (``base_lr * decay**(num_blocks + 1)``). Within
+    ``base_lr * decay**(num_blocks - i)``, patch embed / pos embed / cls / register /
+    distillation tokens at the deepest-decayed rate (``base_lr * decay**(num_blocks + 1)``). Within
     every depth group, params are further split into decay / no_decay -- LayerNorm
     weights, all biases, and anything in ``model.no_weight_decay()`` get
     ``weight_decay=0.0``, per standard practice.
