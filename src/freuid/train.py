@@ -125,8 +125,23 @@ def build_loaders(
     model_type = cfg.extra.get("model_type", "baseline")
     return_face_meta = model_type == "consistency" and bool(cfg.extra.get("use_face_region", False))
 
+    analog_double = bool(cfg.extra.get("analog_double", False))
     synth_prob = float(cfg.extra.get("synth_tamper_prob", 0.0))
-    if synth_prob > 0.0:
+    if analog_double:
+        from freuid.augment import AnalogDoubleDataset, recapture_transforms
+        _base_train_ds = FreuidDataset(
+            cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir,
+            return_face_meta=return_face_meta,
+        )
+        # original copy: clean (resize+normalize, no aug); analog copy: recapture. is_digital only.
+        clean_tf = build_transforms(size, False, mean, std)
+        analog_tf = recapture_transforms(size, mean, std)
+        train_ds = AnalogDoubleDataset(_base_train_ds, clean_tf, analog_tf)
+        print(
+            f"[train] analog_double: {len(_base_train_ds.samples)} originals "
+            f"+ {len(train_ds.analog_idx)} analog(is_digital) copies = {len(train_ds)} total"
+        )
+    elif synth_prob > 0.0:
         from freuid.augment import SynthTamperWrapper, recapture_transforms
         _base_train_ds = FreuidDataset(
             cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir,

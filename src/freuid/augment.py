@@ -265,3 +265,40 @@ class SynthTamperWrapper(Dataset):
         if self._return_face_meta:
             return img_pil, label, face_meta_tensor(sample, img_size)
         return img_pil, label
+
+
+class AnalogDoubleDataset(Dataset):
+    """Doubles the dataset with analog (recapture) copies of the digital images.
+
+    The training set becomes {every image, clean transform} ∪ {every is_digital=True image
+    again, recapture transform}. Each digital document is thus seen both as-is and as a
+    simulated print-and-recapture, with its original label preserved -- teaching the model
+    the digital AND the analog appearance (the digital→physical shift the hidden test probes).
+    is_digital=False images (already physically captured) are not duplicated.
+
+    The base dataset must be built with transform=None so this wrapper owns all transforms.
+    Yields (image, label); the consistency face-meta path is not supported here.
+    """
+
+    def __init__(self, base: Dataset, clean_transform, analog_transform) -> None:
+        self.base = base
+        self.clean_tf = clean_transform
+        self.analog_tf = analog_transform
+        # indices of digital samples -- these get a second, recaptured copy appended
+        self.analog_idx = [
+            i for i, s in enumerate(getattr(base, "samples", [])) if s.is_digital
+        ]
+        self.n = len(base.samples)  # type: ignore[attr-defined]
+
+    def __len__(self) -> int:
+        return self.n + len(self.analog_idx)
+
+    def __getitem__(self, idx: int):
+        if idx < self.n:
+            sample, tf = self.base.samples[idx], self.clean_tf  # type: ignore[attr-defined]
+        else:
+            sample = self.base.samples[self.analog_idx[idx - self.n]]  # type: ignore[attr-defined]
+            tf = self.analog_tf
+        src = sample.card_path if sample.card_path is not None else sample.path
+        img = Image.open(src).convert("RGB")
+        return tf(img), sample.label

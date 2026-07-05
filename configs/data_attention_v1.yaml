@@ -1,0 +1,50 @@
+# configs/data_attention_v1.yaml
+# data-attention experiment: attention-pool head + a clean offline "analog-double" data pipeline.
+#
+# Data design (replaces finetune_v0's on-the-fly recapture + synthetic tamper):
+#   train set = {all images, clean}  ∪  {is_digital=True images, recapture}
+#   -> each digital doc is seen both as-is AND print-and-recaptured, label preserved,
+#      so the model learns the digital and the analog appearance (the digital->physical
+#      shift the hidden test probes). is_digital=False images are not duplicated.
+#   validation = default label×type stratified split (every doc type represented), clean.
+#
+# Dropped: synth_tamper, recapture probe, LODO (val_doc_types), blanket recapture augment.
+# Kept:    model recipe (DINOv2 reg4 518, LLRD+warmup+AMP, attention-pool head),
+#          AUC ranking loss, multi-scale TTA at inference.
+
+name: data_attention_v1
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20                 # note: analog_double ~doubles the samples/epoch — reduce if too slow
+batch_size: 32
+lr: 1.0e-4
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1          # label×type stratified split (no val_doc_types -> every type in val)
+
+extra:
+  pool: map                # attention-pool head (the branch's model change)
+
+  # --- Data design: offline analog doubling ---
+  analog_double: true      # train = {all, clean} ∪ {is_digital, recapture}
+  # (no `augment`, `synth_tamper_prob`, or probe — the doubling is the whole data strategy)
+
+  # Ranking loss + inference TTA (kept from the winning recipe)
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+
+  # Layer-wise LR decay + AMP
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  train_last_k_blocks: null
+  grad_checkpointing: false
+  amp: true
