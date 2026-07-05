@@ -219,7 +219,11 @@ def main() -> None:
         from freuid.models import build_consistency_model
         model = build_consistency_model(cfg).to(device)
     else:
-        model = build_model(cfg.backbone, pretrained=False).to(device)
+        model = build_model(
+            cfg.backbone, pretrained=False,
+            pool=cfg.extra.get("pool"),
+            head_dropout=float(cfg.extra.get("head_dropout", 0.0)),
+        ).to(device)
     model.load_state_dict(state["model"])
     model.eval()
 

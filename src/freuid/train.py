@@ -295,7 +295,11 @@ def main() -> None:
         from freuid.models import build_consistency_model
         model = build_consistency_model(cfg).to(device)
     else:
-        model = build_model(cfg.backbone, cfg.pretrained).to(device)
+        model = build_model(
+            cfg.backbone, cfg.pretrained,
+            pool=cfg.extra.get("pool"),
+            head_dropout=float(cfg.extra.get("head_dropout", 0.0)),
+        ).to(device)
         # Fine-tuning knobs (baseline/ViT path only; frozen consistency path untouched).
         train_last_k = cfg.extra.get("train_last_k_blocks")
         if train_last_k is not None:

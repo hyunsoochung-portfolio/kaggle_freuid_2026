@@ -1,0 +1,64 @@
+# configs/data_attention_v0.yaml
+# A/B experiment: IDENTICAL to finetune_v0.yaml except the head pooling.
+# finetune_v0 uses the backbone's default pooling; here we swap in attention pooling
+# (extra.pool: map) — a learned query token attends to suspicious patches instead of
+# averaging them, which better fits local/subtle document tampering. Everything else
+# (DINOv2 reg4 backbone, 518px, LLRD+warmup+AMP, recapture augment + synth-tamper, AUC
+# loss, recapture probe, TTA) is unchanged, so any score delta is attributable to the head.
+
+name: data_attention_v0
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size: 32
+lr: 1.0e-4          # LLRD head/base LR
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  # --- The one change vs finetune_v0: attention-pool head ---
+  pool: map          # learned attention pooling (timm global_pool='map')
+
+  # Augmentation: print-and-recapture pipeline (no flip)
+  augment: recapture
+  # Synthetic tamper: 30% of bona-fide per batch become synthetic positives
+  synth_tamper_prob: 0.3
+  # Pairwise soft-AUC term
+  auc_loss_weight: 0.1
+
+  # Recapture probe: the compass (checkpoint on probe_audet, not the trivially-easy val AuDET)
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  # Inference: TTA at three scales, multiples of patch_size=14, rank-averaged, no flip
+  tta: [476, 518, 560]
+
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
+
+  # Layer-wise LR decay fine-tuning
+  llrd:
+    enabled: true
+    decay: 0.7           # per-block LR multiplier moving from head -> input
+    warmup_epochs: 2     # linear warmup, then cosine decay over the remaining epochs
+
+  # Fallbacks (unused here; full fine-tune)
+  train_last_k_blocks: null
+  grad_checkpointing: false
+
+  # AMP (autocast + GradScaler)
+  amp: true
