@@ -15,10 +15,9 @@ Label convention matches metrics.py: 1 = fraud, 0 = bona-fide, -1 = unknown (tes
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-
-import logging
 
 import numpy as np
 import pandas as pd
@@ -50,7 +49,8 @@ class Sample:
     is_digital: bool | None = None
     type: str | None = None  # "COUNTRY/DOCTYPE", e.g. "EGYPT/DL"
     card_path: Path | None = None   # rectified card PNG from regions cache (use_rectify)
-    face_box: dict | None = field(default=None, repr=False)  # bbox from regions cache (use_face_region)
+    # bbox from regions cache (use_face_region)
+    face_box: dict | None = field(default=None, repr=False)
 
 
 def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
@@ -85,7 +85,7 @@ def unpack_batch(batch):
     return imgs, labels, None
 
 
-def face_meta_tensor(sample: "Sample", img_size: tuple[int, int]) -> torch.Tensor:
+def face_meta_tensor(sample: Sample, img_size: tuple[int, int]) -> torch.Tensor:
     """Face-box fractions + validity flag for the FaceRegionHead: [x1,y1,x2,y2,valid].
 
     ``img_size`` is the (W, H) of the image actually opened for this sample (the

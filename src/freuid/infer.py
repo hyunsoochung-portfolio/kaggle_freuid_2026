@@ -153,7 +153,7 @@ def predict_scores_tta(
         avg_ranks += np.array(ranked)
     avg_ranks /= len(per_scale_scores)
 
-    return list(zip(sample_ids or [], avg_ranks.tolist()))
+    return list(zip(sample_ids or [], avg_ranks.tolist(), strict=True))
 
 
 def check_submission(path: str | Path) -> None:
@@ -294,7 +294,8 @@ def main() -> None:
         from freuid.preprocess import regions_dir as _get_rdir
         _rdir = _get_rdir(cfg.data_dir)
         if not _rdir.exists():
-            print(f"[infer] WARNING: use_rectify=True but cache not found at {_rdir}; using raw images")
+            print(f"[infer] WARNING: use_rectify=True but cache not found "
+                  f"at {_rdir}; using raw images")
             _rdir = None
         else:
             print(f"[infer] use_rectify=True → loading from {_rdir}")
@@ -331,7 +332,9 @@ def main() -> None:
             cfg.data_dir, "public_test", transform, ids=present_ids, regions_dir=_rdir,
             return_face_meta=return_face_meta,
         )
-        loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
+        loader = DataLoader(
+            ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers
+        )
         scores = predict_scores(model, loader, device)
         # strict=True: id 개수와 score 개수가 다르면 조용히 잘리지 않고 에러를 낸다(짝 어긋남 방지).
         id_to_score = dict(zip((s.id for s in ds.samples), scores, strict=True))

@@ -26,7 +26,8 @@ from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
 
-def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: float = 0.0, scaler=None):
+def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: float = 0.0,
+              scaler=None):
     """One pass. With an optimizer it trains; without, it evaluates.
 
     Returns (mean_loss, scores, labels) where scores = P(fraud). In train mode the
@@ -190,7 +191,8 @@ def _check_init_loss(model, loader, device, criterion, tol: float = 0.3) -> None
     print(f"[sanity] init BCE={loss:.4f} ~= ln2={expected:.4f} (tol={tol}) OK")
 
 
-def _sanity_overfit(model, loader, device, criterion, steps: int = 100, target: float = 0.02) -> None:
+def _sanity_overfit(model, loader, device, criterion, steps: int = 100,
+                    target: float = 0.02) -> None:
     """Overfit a single batch to near-zero loss; asserts the forward+backward path works.
 
     Runs on a COPY of the model so the real training weights are untouched.
@@ -268,7 +270,8 @@ def main() -> None:
                 model.set_grad_checkpointing(True)
                 print("[train] gradient checkpointing enabled")
             else:
-                print(f"[train] WARNING: grad_checkpointing=True but {cfg.backbone} has no set_grad_checkpointing")
+                print(f"[train] WARNING: grad_checkpointing=True but {cfg.backbone} "
+                      "has no set_grad_checkpointing")
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # Always check init loss before any weight updates.
@@ -316,14 +319,17 @@ def main() -> None:
     best_metric = float("inf")
     best_tiebreak = float("inf")
     for epoch in range(1, cfg.epochs + 1):
-        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer, auc_weight, scaler=scaler)
-        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion, scaler=scaler)
+        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer,
+                                   auc_weight, scaler=scaler)
+        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion,
+                                                     scaler=scaler)
         m = evaluate(val_scores, val_labels)
         last_lrs = scheduler.get_last_lr()
         lr = last_lrs[0] if len(last_lrs) == 1 else max(last_lrs)
         scheduler.step()
 
-        lr_str = f"lr={lr:.2e}" if len(last_lrs) == 1 else f"lr_head={lr:.2e} lr_min={min(last_lrs):.2e}"
+        lr_str = (f"lr={lr:.2e}" if len(last_lrs) == 1
+                  else f"lr_head={lr:.2e} lr_min={min(last_lrs):.2e}")
         print(
             f"\n[epoch {epoch:>2}/{cfg.epochs}] {lr_str} train_loss={train_loss:.4f} "
             f"val_loss={val_loss:.4f} AuDET={m['audet']:.4f} "
