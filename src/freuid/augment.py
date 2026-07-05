@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import albumentations as A
 import numpy as np
 import torch
-from PIL import Image, ImageFilter
-import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from PIL import Image, ImageFilter
 from torch.utils.data import Dataset
 
 from freuid.data import FACE_META_DIM, face_meta_tensor
@@ -34,8 +34,13 @@ def recapture_transforms(
     image_size: int,
     mean: tuple[float, float, float],
     std: tuple[float, float, float],
+    seed: int | None = None,
 ) -> _AlbumentationsTransform:
-    """Print-and-recapture simulation for TRAIN images.
+    """Print-and-recapture simulation.
+
+    ``seed`` makes the degradation reproducible (albumentations 2.x seeds the pipeline, not
+    the global RNG). Pass a seed to get a fixed, identical degradation -- used to keep the
+    validation analog copies stable across epochs. Leave None for random train augmentation.
 
     Ordered to match the real analog degradation chain:
       1. spatial resize (to the network's input resolution)
@@ -81,7 +86,7 @@ def recapture_transforms(
         # ImageNet normalise + CHW tensor
         A.Normalize(mean=mean, std=std),
         ToTensorV2(),
-    ])
+    ], seed=seed)
     return _AlbumentationsTransform(pipeline)
 
 
@@ -278,12 +283,22 @@ class AnalogDoubleDataset(Dataset):
 
     The base dataset must be built with transform=None so this wrapper owns all transforms.
     Yields (image, label); the consistency face-meta path is not supported here.
+
+    ``make_analog`` is a factory ``seed -> transform`` (e.g. a partial of recapture_transforms).
+    ``deterministic_seed``: set it for VALIDATION -- each analog copy is then built from a fresh
+    pipeline seeded with (deterministic_seed + sample_index), so the recaptured val images are
+    identical every epoch (albumentations 2.x seeds the pipeline, not the global RNG, so this is
+    the only way to fix them). Leave None for training (one shared random pipeline).
     """
 
-    def __init__(self, base: Dataset, clean_transform, analog_transform) -> None:
+    def __init__(
+        self, base: Dataset, clean_transform, make_analog, deterministic_seed: int | None = None
+    ) -> None:
         self.base = base
         self.clean_tf = clean_transform
-        self.analog_tf = analog_transform
+        self.make_analog = make_analog          # seed (int|None) -> analog transform
+        self.det_seed = deterministic_seed
+        self._analog_tf = make_analog(None)     # one random pipeline, reused for train copies
         # indices of digital samples -- these get a second, recaptured copy appended
         self.analog_idx = [
             i for i, s in enumerate(getattr(base, "samples", [])) if s.is_digital
@@ -297,8 +312,12 @@ class AnalogDoubleDataset(Dataset):
         if idx < self.n:
             sample, tf = self.base.samples[idx], self.clean_tf  # type: ignore[attr-defined]
         else:
-            sample = self.base.samples[self.analog_idx[idx - self.n]]  # type: ignore[attr-defined]
-            tf = self.analog_tf
+            orig_i = self.analog_idx[idx - self.n]
+            sample = self.base.samples[orig_i]  # type: ignore[attr-defined]
+            # val: fresh pipeline seeded per-sample -> identical every epoch.
+            # train: the shared random pipeline -> fresh degradation each pass.
+            tf = self.make_analog(self.det_seed + orig_i) if self.det_seed is not None \
+                else self._analog_tf
         src = sample.card_path if sample.card_path is not None else sample.path
         img = Image.open(src).convert("RGB")
         return tf(img), sample.label
