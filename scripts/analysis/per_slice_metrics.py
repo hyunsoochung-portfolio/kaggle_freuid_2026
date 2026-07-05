@@ -1,16 +1,15 @@
 """Per-slice diagnostic metrics for the finetune_v0 checkpoint.
 
-Scores finetune_v0's own training-time validation split (plain, undegraded transform --
-matches what train.py's val_loader used, NOT the recapture probe) and reports AuDET /
-APCER@1%BPCER overall, per document type, and per is_digital.
+Scores finetune_v0's own training-time validation split with a plain, undegraded eval
+transform and reports AuDET / APCER@1%BPCER overall, per document type, and per is_digital.
+(Note: train.py's val_loader now analog-doubles is_digital images -- clean + recaptured
+copies -- so this clean-only scoring is the undegraded half of that split.)
 
-Also states explicitly whether val positives are circular (produced by SynthTamperWrapper)
-by construction: train.py's build_loaders only wraps train_ds in SynthTamperWrapper when
-synth_tamper_prob > 0 -- val_ds is always a plain FreuidDataset built straight from
-train_labels.csv, so every val positive is a genuine, dataset-labeled fraud sample, never a
-synthetic tamper edit. This script does not re-derive that from runtime behavior (there is
-no per-sample "was this synthetic" flag once written to the val split -- the wrapper info
-is structural/architectural), so this is a documented code-reading fact, not a measurement.
+Also states explicitly that val positives are NOT circular/synthetic: build_loaders builds
+val_ds from train_labels.csv via AnalogDoubleDataset, which only appends analog (recapture)
+COPIES of real images with their original labels preserved -- it never fabricates synthetic
+fraud. So every val label=1 sample is a genuine, dataset-labeled fraud, not a generated edit.
+This is a documented code-reading fact, not a per-sample runtime measurement.
 
 Also flags that train_labels.csv has no attack/fraud-type column (only id, image_path,
 label, is_digital, type) -- so a true per-attack-type slice (physical tamper / GenAI edit /
@@ -44,10 +43,10 @@ from common import (  # noqa: E402
 from freuid.metrics import evaluate  # noqa: E402
 
 VAL_CIRCULARITY_NOTE = (
-    "val positives are NOT synthetic: train.py's build_loaders() only wraps train_ds in "
-    "SynthTamperWrapper (synth_tamper_prob > 0); val_ds is always a plain FreuidDataset "
-    "built directly from train_labels.csv. Every label=1 val sample is a genuine, "
-    "dataset-provided fraud example -- val is not circular with respect to synth_tamper."
+    "val positives are NOT synthetic: build_loaders() builds val_ds from train_labels.csv "
+    "via AnalogDoubleDataset, which only appends analog (recapture) copies of real images "
+    "with labels preserved -- it never fabricates synthetic fraud. Every label=1 val sample "
+    "is a genuine, dataset-provided fraud example -- val is not circular."
 )
 ATTACK_TYPE_NOTE = (
     "train_labels.csv has no attack/fraud-type column (columns: id, image_path, label, "
