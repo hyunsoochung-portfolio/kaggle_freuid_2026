@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import math
 from pathlib import Path
 
@@ -128,8 +129,9 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
         val_ds = FreuidDataset(cfg.data_dir, "train", clean_tf, ids=val_ids,
                                regions_dir=_rdir, return_face_meta=rfm)
     else:
-        def make_analog(seed):  # seed -> recapture pipeline (None = random, int = reproducible)
-            return recapture_transforms(size, mean, std, seed=seed)
+        # partial (not a local closure) so DataLoader workers can pickle it under 'spawn'
+        # (macOS default); calling it with a seed -> recapture pipeline (None=random, int=fixed).
+        make_analog = functools.partial(recapture_transforms, size, mean, std)
         base_train = FreuidDataset(cfg.data_dir, "train", None, ids=train_ids)
         base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
         train_ds = AnalogDoubleDataset(base_train, clean_tf, make_analog)
