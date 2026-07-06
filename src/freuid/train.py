@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, lodo_split, stratified_split, unpack_batch
+from freuid.data import FreuidDataset, stratified_split, unpack_batch
 from freuid.loss import combined_loss
 from freuid.metrics import evaluate
 from freuid.models import build_model
@@ -89,13 +89,6 @@ def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: floa
     return mean_loss, torch.cat(all_scores).numpy(), torch.cat(all_labels).numpy()
 
 
-def _split_ids(cfg: Config) -> tuple[set[str], set[str]]:
-    """Train/val id split: Leave-One-Domain-Out if val_doc_type is set, else stratified."""
-    if cfg.val_doc_type:
-        return lodo_split(cfg.data_dir, cfg.val_doc_type)
-    return stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
-
-
 def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
     """Train/val loaders. By default both are analog-doubled: {all images, clean} ∪
     {is_digital images, recapture}. Each digital doc is seen as-is AND print-and-recaptured
@@ -109,7 +102,7 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
     """
     from freuid.augment import AnalogDoubleDataset, recapture_transforms
 
-    train_ids, val_ids = _split_ids(cfg)
+    train_ids, val_ids = stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
     if cfg.limit:  # deterministic subset (sorted by id) for fast dev/smoke runs
         train_ids = set(sorted(train_ids)[: cfg.limit])
         val_ids = set(sorted(val_ids)[: max(1, cfg.limit // 5)])

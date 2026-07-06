@@ -18,8 +18,7 @@ lr: 3.0e-4
 weight_decay: 1.0e-4
 num_workers: 8
 
-# --- in-domain split (stratified; all types in train and val) ---
-# val_doc_type is intentionally unset → stratified_split is used.
+# stratified split (all document types represented in train and val)
 val_fraction: 0.1
 
 # --- S0 additions (land in cfg.extra; implemented by s0_onramp_prompts.md) ---
