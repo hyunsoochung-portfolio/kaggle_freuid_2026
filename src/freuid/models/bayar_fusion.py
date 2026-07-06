@@ -53,16 +53,26 @@ class BayarConv2d(nn.Module):
         self.padding = kernel_size // 2
 
     def _constrained_weights(self) -> torch.Tensor:
-        w = self.weight.clone()
-        w[:, :, self.center, self.center] = 0
-        s = w.sum(dim=(2, 3), keepdim=True)
-        s = s + (s == 0).float() * 1e-8
-        w = w / s
-        w[:, :, self.center, self.center] = -1
+        # Forced FP32 regardless of the outer AMP context: this division is numerically
+        # sensitive (s can be gradient-driven toward zero during training -- observed
+        # shrinking to ~7e-4 within one epoch), and FP16's ~65504 max makes 1/s overflow to
+        # Inf far more easily than FP32 would. A crashed training run hit exactly this:
+        # NaN in val scores traced to this division under autocast.
+        with torch.autocast(device_type=self.weight.device.type, enabled=False):
+            w = self.weight.float().clone()
+            w[:, :, self.center, self.center] = 0
+            s = w.sum(dim=(2, 3), keepdim=True)
+            # Clamp |s| away from zero instead of only guarding the exact s==0 case -- the
+            # original guard (`s + (s==0)*1e-8`) doesn't stop 1/s from blowing up as s
+            # approaches (but never exactly hits) zero, which is what actually happened.
+            s_sign = torch.where(s == 0, torch.ones_like(s), torch.sign(s))
+            s_safe = s_sign * s.abs().clamp_min(1e-2)
+            w = w / s_safe
+            w[:, :, self.center, self.center] = -1
         return w
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.conv2d(x, self._constrained_weights(), self.bias, padding=self.padding)
+        return F.conv2d(x, self._constrained_weights().to(x.dtype), self.bias, padding=self.padding)
 
 
 class NoiseStream(nn.Module):
@@ -162,7 +172,14 @@ class BayarFusionNet(nn.Module):
         face_meta: torch.Tensor | None = None,
     ) -> torch.Tensor:
         dino_feat = self.dino(imgs)
-        overlay_feat = self.overlay(face_crop) * self.overlay_gate
+        overlay_raw = self.overlay(face_crop)
+        # Sanitize before any gating/masking: multiplying a non-finite value by 0 (the
+        # invalid-sample mask below, or a near-zero gate) yields NaN, not 0 -- it does NOT
+        # safely zero out a bad upstream value. This is the second half of the fix for a
+        # crashed run where NaN reached the fusion output; the first half (bounding
+        # BayarConv2d's internal division) addresses the likely source, this is the backstop.
+        overlay_raw = torch.nan_to_num(overlay_raw, nan=0.0, posinf=0.0, neginf=0.0)
+        overlay_feat = overlay_raw * self.overlay_gate
         if face_meta is not None:
             valid = face_meta[:, FACE_META_DIM - 1 : FACE_META_DIM]
             overlay_feat = overlay_feat * valid
