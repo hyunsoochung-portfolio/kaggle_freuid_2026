@@ -5,7 +5,7 @@ passed through recapture_transforms — i.e. exactly what the model sees
 during training when synth_tamper_prob > 0.
 
 Usage (run from repo root on the VESSL workspace):
-    python scripts/check_synth_tamper.py --config configs/baseline_v0.yaml
+    python scripts/check_synth_tamper.py --config configs/finetune_v0.yaml
 
 Output: synth_samples/<edit_type>_<n>.png  (denormalized, visually inspectable)
 """
@@ -39,7 +39,7 @@ def _denorm(tensor, mean, std):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/baseline_v0.yaml")
+    parser.add_argument("--config", default="configs/finetune_v0.yaml")
     parser.add_argument("--data-dir", default=None, help="override data_dir from config")
     parser.add_argument("--out-dir", default="synth_samples")
     parser.add_argument("--n-per-type", type=int, default=3,
