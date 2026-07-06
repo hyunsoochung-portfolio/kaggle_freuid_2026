@@ -295,7 +295,11 @@ def main() -> None:
         from freuid.models import build_consistency_model
         model = build_consistency_model(cfg).to(device)
     else:
-        model = build_model(cfg.backbone, cfg.pretrained).to(device)
+        model = build_model(
+            cfg.backbone, cfg.pretrained,
+            drop_path_rate=cfg.extra.get("drop_path_rate"),
+            head_type=cfg.extra.get("head_type", "gap"),
+        ).to(device)
         # Fine-tuning knobs (baseline/ViT path only; frozen consistency path untouched).
         train_last_k = cfg.extra.get("train_last_k_blocks")
         if train_last_k is not None:
@@ -329,11 +333,17 @@ def main() -> None:
             optimizer, cfg.epochs, warmup_epochs=int(llrd_cfg.get("warmup_epochs", 2)),
         )
     else:
+        from freuid.optim import build_warmup_cosine_scheduler
         trainable = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
         # Cosine decay over the run: anneals LR toward 0 by the final epoch. Helps the
         # pretrained RGB backbone settle rather than oscillating at a flat LR.
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
+        # extra.warmup_epochs (default 0) prepends a linear warmup -- absent in every
+        # existing config, so this reproduces the old plain-CosineAnnealingLR schedule
+        # exactly unless a config opts in.
+        scheduler = build_warmup_cosine_scheduler(
+            optimizer, cfg.epochs, warmup_epochs=int(cfg.extra.get("warmup_epochs", 0)),
+        )
 
     auc_weight = float(cfg.extra.get("auc_loss_weight", 0.0))
     if auc_weight > 0.0:

@@ -1,0 +1,53 @@
+# configs/eva01_v0.yaml
+# Backbone sweep, member 2/3 — EVA-01 ViT-Large/14 (IN22k->IN1k), full fine-tune.
+# Same recipe skeleton as siglip2_v0.yaml/finetune_v0.yaml; see siglip2_v0.yaml's header
+# for what extra.drop_path_rate / extra.head_type / extra.warmup_epochs do.
+#
+# This is the "eva-01" line (eva_*), not eva02_* -- larger than the ViT-B backbones used
+# elsewhere in the sweep (~304M params), so batch_size is halved and grad_checkpointing
+# is on to keep memory in budget on a single A100.
+
+name: eva01_v0
+seed: 42
+data_dir: data
+
+# EVA-01 ViT-Large/14, CLS token present (num_prefix_tokens=1 -- confirmed via timm).
+backbone: eva_large_patch14_336.in22k_ft_in22k_in1k
+pretrained: true
+image_size: 336
+
+epochs: 20
+batch_size: 16       # ~304M params, largest backbone in the sweep
+lr: 3.0e-5           # more conservative than siglip2_v0: bigger model, full fine-tune
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  drop_path_rate: 0.2   # higher than the other sweep members: largest/most overfit-prone
+  head_type: gem
+
+  augment: recapture
+  synth_tamper_prob: 0.3
+  auc_loss_weight: 0.1
+
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  warmup_epochs: 3
+  amp: true
+  grad_checkpointing: true
+
+  # TTA scales must be multiples of patch_size=14 (308=14x22, 336=14x24, 364=14x26).
+  tta: [308, 336, 364]
+
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID

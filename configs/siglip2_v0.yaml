@@ -1,0 +1,52 @@
+# configs/siglip2_v0.yaml
+# Backbone sweep, member 1/3 — SigLIP2 ViT-B/16 (webli-v2 weights), full fine-tune.
+# Same recipe skeleton as finetune_v0.yaml/baseline_v1.yaml (recapture augment, synth
+# tamper, soft-AUC loss, probe-based checkpointing) with three sweep-wide additions:
+# extra.drop_path_rate (stochastic depth, guards a full fine-tune against overfitting),
+# extra.head_type=gem (GAP+GeM pooled forensic head instead of plain average pooling --
+# see src/freuid/models/heads.py), and extra.warmup_epochs (3-epoch linear warmup before
+# cosine decay, wired generically in train.py's non-LLRD optimizer branch).
+
+name: siglip2_v0
+seed: 42
+data_dir: data
+
+# SigLIP2 ViT-B/16, no CLS token (num_prefix_tokens=0 -- confirmed via timm), native 256px.
+backbone: vit_base_patch16_siglip_256.v2_webli
+pretrained: true
+image_size: 256
+
+epochs: 20
+batch_size: 32
+lr: 5.0e-5          # full-ViT fine-tune; conservative vs. a from-scratch head LR
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  drop_path_rate: 0.1
+  head_type: gem
+
+  augment: recapture
+  synth_tamper_prob: 0.3
+  auc_loss_weight: 0.1
+
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  warmup_epochs: 3
+  amp: true
+
+  # TTA scales must be multiples of patch_size=16 (224=16x14, 256=16x16, 288=16x18).
+  tta: [224, 256, 288]
+
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID

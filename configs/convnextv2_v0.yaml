@@ -1,0 +1,52 @@
+# configs/convnextv2_v0.yaml
+# Backbone sweep, member 3/3 — ConvNeXt V2-Base (FCMAE pretrain, IN22k->IN1k FT), full
+# fine-tune. Same recipe skeleton as siglip2_v0.yaml/eva01_v0.yaml; see siglip2_v0.yaml's
+# header for what extra.drop_path_rate / extra.head_type / extra.warmup_epochs do.
+#
+# CNN backbone (no ``.blocks`` attribute), so this deliberately does NOT use LLRD
+# (extra.llrd is ViT-only, see src/freuid/optim.py) -- plain AdamW + the shared
+# warmup->cosine schedule instead.
+
+name: convnextv2_v0
+seed: 42
+data_dir: data
+
+# ConvNeXt V2-Base, FCMAE self-supervised pretrain + IN22k/IN1k supervised fine-tune.
+backbone: convnextv2_base.fcmae_ft_in22k_in1k
+pretrained: true
+image_size: 224
+
+epochs: 20
+batch_size: 32
+lr: 1.0e-4
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  drop_path_rate: 0.1
+  head_type: gem
+
+  augment: recapture
+  synth_tamper_prob: 0.3
+  auc_loss_weight: 0.1
+
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  warmup_epochs: 3
+  amp: true
+
+  # CNN backbone -- no patch-size constraint; auto TTA (rounds to multiples of 32).
+  tta: true
+
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
