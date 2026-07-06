@@ -167,7 +167,11 @@ truly doesn't matter, only pairwise ordering — see the FREUID formula in the P
 the next-step priorities in rough order:
 
 1. **Build the unseen-domain validation probe** (above) — everything below is hard to evaluate
-   without it.
+   without it. Made more urgent, not just still-true, by `exp/bayar+dinov2`: that experiment's
+   local probe hit an exact, saturated **0.0** and the public LB still came back ~2.9x *worse*
+   than baseline. The local instrument didn't just lack resolution between two good candidates
+   (its known limit) — it was completely blind to a real regression. Every remaining idea below
+   faces the same blind spot until this exists.
 2. **Loss-level: target APCER@1%BPCER specifically.** The pairwise soft-AUC term
    (`auc_loss_weight=0.1`) optimizes the *full* curve; APCER@1%BPCER is a partial-AUC metric that
    only cares about the strict tail near the 99th-percentile bona-fide threshold. A full-curve
@@ -204,15 +208,45 @@ still fires correctly on genuinely-digital (not-yet-reprinted) face manipulation
 Lesson: overlay_colab's *decisiveness* on the hesitant zone doesn't mean *correctness* — rank
 metrics punish a confidently-wrong call (pushed to 0.99+) far more than they punish an
 ambiguous 0.5, so any fixed-weight or fixed-override combination that can't tell which of its
-calls to trust is a net loss. **Next real experiment (branch `exp/bayar+dinov2`)**: feature-level
-fusion — concatenate DINOv2's CLS embedding with `TwoStreamOverlayNet`'s pooled features behind
-a **gated** (LayerScale-style, near-zero-init) fusion head, fully fine-tuned end-to-end
-*with* recapture augmentation applied to both streams, so the model can learn *when* to trust
-the noise signal instead of applying a fixed rule. This is the same experiment shape as S2/S3
-(multi-branch fusion into a head) with a different second branch — S3's failure was root-caused
-to the frozen backbone + missing gating, both addressable this time. Validate specifically
-against the recapture probe (reprint robustness), not just plain val AuDET, given this
-architecture family's known fragility (see Restriction, above).
+calls to trust is a net loss.
+
+**Follow-up (branch `exp/bayar+dinov2`), tried and also negative — read before repeating.**
+Built `BayarFusionNet` (`src/freuid/models/bayar_fusion.py`): DINOv2's CLS embedding gated-fused
+(LayerScale-style, near-zero-init `overlay_gate`) with a BayarConv2d-noise + RGB-ResNet34 branch
+on a cached-SCRFD face crop, **fully fine-tuned end-to-end** with recapture augmentation applied
+to both streams — the same experiment shape as S2/S3 but with both of S3's diagnosed root causes
+fixed (frozen backbone → fine-tuned; missing gating → LayerScale gate from init). Config
+`configs/bayar_dinov2_v0.yaml`, checkpoint best at epoch 18.
+
+- **Local probe: perfect** (`probe_AuDET=0.0`, exact). **Public LB: 0.02146** — ~2.9x worse than
+  finetune_v0 (0.00744), worse than every score-level overlay_colab combination too.
+- **The gate was not dormant**: inspected the trained checkpoint directly — 100% of
+  `overlay_gate`'s 640 elements moved >10x from their `1e-3` init (mean magnitude 0.062). The
+  model genuinely learned to rely on the branch; that reliance is *why* it overfit, not evidence
+  the branch stayed inert.
+- **Root cause (most to least confident)**: (1) the extra branch is pure added capacity to fit
+  the closed train/val/probe loop without that fit needing to generalize — contrast with
+  finetune_v0, which *also* hits probe≈0 and still generalizes, so "perfect local score" isn't
+  the problem, "an extra unconstrained pathway to a perfect local score" is; (2) `recapture_transforms`
+  applied to the face-crop stream (JPEG recompress/blur/noise/downscale) is specifically built to
+  simulate print-and-recapture degradation — which is also exactly the kind of degradation that
+  erases the fine noise residue BayarConv2d depends on, so joint training under this augmentation
+  likely undercut the branch's own intended signal while still leaving room to fit something
+  locally predictive but non-generalizing; (3) secondary: SCRFD only finds a *valid* (non-fallback)
+  face on ~1 in 5 documents overall (both splits — most ID-card portraits are too small/off-angle
+  for a general-purpose detector), and the valid-detection rate differs by split (train 21.5% vs
+  public_test 16.4%) — this alone is too small to explain a 2.9x regression, but it's a real,
+  measured train/test distribution mismatch in how often the branch's shared fusion-layer weights
+  see an actually-informative input. Confirmed *not* a scoring bug: TTA ranges were sane at all
+  3 scales, submission integrity was clean, and the eval code path is identical to finetune_v0/v2's.
+- **Verdict**: this is the second time a forensic/consistency-style second branch has looked
+  great locally and failed to transfer (S2/S3, now this) — different failure mechanism each time,
+  same outcome. Treat as a structural mismatch between forensic-noise features and this project's
+  reprint-robustness training regime, not a bug to patch. **Do not retry this fusion family**
+  (BayarConv2d/SRM-style noise-residual branches, jointly trained under recapture augmentation)
+  without a specific new idea for resolving the augmentation-vs-noise-signal conflict — swapping
+  the face detector (SCRFD→MTCNN) was considered and isn't expected to help, since the coverage
+  gap was a minor factor and detector choice doesn't address the bigger two causes.
 
 ## Compute & environment
 
