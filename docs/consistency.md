@@ -200,8 +200,14 @@ Two independent, composable pieces, both gated by config (`cfg.extra.augment`,
 
 ### Validation & the recapture probe
 
-Per `CLAUDE.md`: standard single-domain LODO saturates and is not trusted
-alone. The actual per-epoch compass is the **recapture probe**
+The train/val split is a **stratified (label × document-type) split**
+(`stratified_split()` in `build_loaders`) — validation preserves the class and
+document-type balance of training rather than isolating a single type. That
+plain val split saturates (in-domain, ~99.97% digital) and is not trusted
+alone; stratifying by type still matters because the hidden test exercises
+document types never seen in training, so keeping every known type represented
+in val is the best in-domain proxy we have for that. The actual per-epoch
+compass is the **recapture probe**
 (`use_recapture_probe: true`, `recapture_probe_seed: 1234`): a held-out clean
 split has `recapture_transforms` applied and AuDET is measured on it every
 epoch; **checkpointing selects on lowest `probe_AuDET`**, not lowest val

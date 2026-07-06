@@ -222,13 +222,16 @@ storing them).
 
 ## Validation split strategy
 
-Both return `(train_ids, val_ids)` as sets of id strings, selected by `_split_ids(cfg)` in
-`train.py`.
+`build_loaders` calls `stratified_split(root, val_fraction=0.1, seed=42)` to produce
+`(train_ids, val_ids)` as sets of id strings.
 
-### Stratified split (the one `finetune_v0` actually uses)
+### Stratified split (the only split — the one `finetune_v0` uses)
 
 `stratified_split(root, val_fraction=0.1, seed=42)` groups by `(label, type)` and samples
 10% from each group. All 5 document types and both classes appear in both train and val.
+Stratifying by `type` matters because the hidden test set probes generalization to
+document types that differ from training — keeping every type represented in both train and
+val keeps the val metric a fair (if in-domain) read on all of them at once.
 
 **Important gap, found via post-hoc diagnostic analysis**: this split does *not* stratify
 on `is_digital`. Since only 20 of 69,352 images are non-digital in the first place, one
@@ -238,14 +241,6 @@ means the near-perfect val AuDET this model achieves is a measurement of **in-do
 digital-fraud detection**, and says essentially nothing about generalization to genuinely
 non-digital, print-and-recaptured images — see `reports/analysis_v0/README.md` for the full
 diagnostic writeup.
-
-### Leave-One-Domain-Out / LODO (available, not used by `finetune_v0`)
-
-`lodo_split(root, val_doc_type)` holds out one entire document type for validation, so train
-and val share no document domain — a more honest (if noisier) proxy for the private test
-set's unseen document types. Not used for `finetune_v0` (kept off to match S1's exact
-recipe for a clean comparison — see `docs/finetune.md`), but available via `val_doc_type` in
-config.
 
 ---
 

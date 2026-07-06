@@ -45,7 +45,7 @@ with 4 register tokens, timm tag, Apache-licensed, no HF gating).
 
 Everything else — `epochs`, `batch_size`, `weight_decay`, `augment`, `synth_tamper_prob`,
 `auc_loss_weight`, `use_recapture_probe`, `recapture_probe_seed`, `checkpoint_metric`,
-`val_fraction`, `val_doc_types`, `missing_id_score`, `seed`, `data_dir` — is byte-identical
+`val_fraction`, `missing_id_score`, `seed`, `data_dir` — is byte-identical
 to `baseline_v1.yaml`.
 
 ## New code, all gated and additive
