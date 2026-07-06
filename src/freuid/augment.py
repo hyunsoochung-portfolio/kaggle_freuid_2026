@@ -15,7 +15,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import Dataset
 
-from freuid.data import FACE_META_DIM, face_meta_tensor
+from freuid.data import FACE_META_DIM, face_crop_image, face_meta_tensor
 
 
 class _AlbumentationsTransform:
@@ -213,6 +213,7 @@ class SynthTamperWrapper(Dataset):
         tamper_transform,
         prob: float,
         seed: int = 0,
+        face_crop_transform=None,
     ) -> None:
         self.base = base
         self.clean_tf = clean_transform
@@ -220,12 +221,20 @@ class SynthTamperWrapper(Dataset):
         self.prob = prob
         self._rng = np.random.default_rng(seed)
         self._return_face_meta = getattr(base, "_return_face_meta", False)
+        self._return_face_crop = getattr(base, "_return_face_crop", False)
+        self._face_crop_size = getattr(base, "_face_crop_size", 224)
+        self._face_crop_margin = getattr(base, "_face_crop_margin", 0.75)
+        self._face_crop_transform = face_crop_transform
+        # Default True matches FreuidDataset's own default -- see its docstring on
+        # use_rectified_as_main for why this must stay in sync with the base dataset.
+        self._use_rectified_as_main = getattr(base, "_use_rectified_as_main", True)
 
         # Pre-load a donor pool of bona-fide images for splice operations.
         # Done once at init so workers share the read-only pool without extra I/O.
-        # Prefer rectified card_path when available (use_rectify path).
+        # Sourced the same way as the main image (use_rectified_as_main), so donor
+        # patches match whatever space the tamper operates in.
         donor_paths: list[Path] = [
-            s.card_path if s.card_path is not None else s.path
+            (s.card_path if (self._use_rectified_as_main and s.card_path is not None) else s.path)
             for s in getattr(base, "samples", [])
             if s.label == 0
         ]
@@ -242,10 +251,22 @@ class SynthTamperWrapper(Dataset):
 
     def __getitem__(self, idx: int):
         sample = self.base.samples[idx]  # type: ignore[attr-defined]
-        src = sample.card_path if sample.card_path is not None else sample.path
+        src = sample.path
+        if self._use_rectified_as_main and sample.card_path is not None:
+            src = sample.card_path
         img_pil = Image.open(src).convert("RGB")
-        img_size = img_pil.size  # (W, H) before any transform -- face_box coord space
         label = sample.label
+
+        # face_meta's box fractions are always in the rectified card's coordinate space --
+        # re-derive the card's own size when it isn't what "src" opened. See the matching
+        # comment in FreuidDataset.__getitem__ (data.py).
+        if sample.card_path is None:
+            img_size = img_pil.size
+        elif src == sample.card_path:
+            img_size = img_pil.size
+        else:
+            with Image.open(sample.card_path) as _card:
+                img_size = _card.size
 
         if label == 0 and self._rng.random() < self.prob:
             arr = np.array(img_pil)
@@ -254,14 +275,33 @@ class SynthTamperWrapper(Dataset):
                 donor = self._donor_pool[int(self._rng.integers(len(self._donor_pool)))]
             tampered, _ = synth_tamper(arr, self._rng, donor)
             img_out = self.tamper_tf(Image.fromarray(tampered))
+            if self._return_face_crop:
+                # Tampering invalidates the cached face box's provenance regardless of
+                # coordinate space -- a placeholder crop paired with invalid face_meta,
+                # so the fusion gate zeroes this branch's contribution outright (same
+                # convention as the face_meta-only case below).
+                face_crop = Image.new("RGB", (self._face_crop_size, self._face_crop_size))
+                if self._face_crop_transform is not None:
+                    face_crop = self._face_crop_transform(face_crop)
+                return img_out, 1, {
+                    "face_meta": torch.zeros(FACE_META_DIM, dtype=torch.float32),
+                    "face_crop": face_crop,
+                }
             if self._return_face_meta:
                 # a tampered sample no longer matches the cached face box's provenance
                 # (it's a synthetic edit), so face_meta is reported invalid, not stale.
                 return img_out, 1, torch.zeros(FACE_META_DIM, dtype=torch.float32)
             return img_out, 1
 
-        if self.clean_tf is not None:
-            img_pil = self.clean_tf(img_pil)
+        img_out = self.clean_tf(img_pil) if self.clean_tf is not None else img_pil
+        if self._return_face_crop:
+            face_crop = face_crop_image(sample, self._face_crop_size, self._face_crop_margin)
+            if self._face_crop_transform is not None:
+                face_crop = self._face_crop_transform(face_crop)
+            return img_out, label, {
+                "face_meta": face_meta_tensor(sample, img_size),
+                "face_crop": face_crop,
+            }
         if self._return_face_meta:
-            return img_pil, label, face_meta_tensor(sample, img_size)
-        return img_pil, label
+            return img_out, label, face_meta_tensor(sample, img_size)
+        return img_out, label

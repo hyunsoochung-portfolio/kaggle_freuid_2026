@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, load_labels, unpack_batch
+from freuid.data import FreuidDataset, forward_with_extras, load_labels, unpack_and_move
 from freuid.models import build_model
 from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
@@ -45,9 +45,8 @@ def predict_scores(model, loader, device) -> list[float]:
     """Fraud scores in dataset order (loader must be shuffle=False)."""
     scores: list[float] = []
     for batch in tqdm(loader, leave=False):
-        imgs, _, face_meta = unpack_batch(batch)
-        imgs = imgs.to(device)
-        logits = model(imgs, face_meta.to(device)) if face_meta is not None else model(imgs)
+        imgs, _, face_meta, face_crop = unpack_and_move(batch, device)
+        logits = forward_with_extras(model, imgs, face_meta, face_crop)
         scores.extend(torch.sigmoid(logits).squeeze(1).cpu().tolist())
     return scores
 
@@ -96,12 +95,20 @@ def predict_scores_tta(
     scales: list[int],
     regions_dir: Path | None = None,
     return_face_meta: bool = False,
+    return_face_crop: bool = False,
+    face_crop_size: int = 224,
+    face_crop_margin: float = 0.75,
+    face_crop_transform=None,
+    use_rectified_as_main: bool = False,
 ) -> list[tuple[str, float]]:
     """Multi-scale TTA: run inference at each scale, rank-average, return (id, score) pairs.
 
     No horizontal flip — documents carry orientation.
     Rank-averaging is used instead of score-averaging because AuDET is a rank
     metric; averaging ranks is invariant to per-scale score calibration differences.
+
+    The face-crop view (bayar_fusion only) stays at a fixed ``face_crop_size`` across all
+    TTA scales -- only the whole-document view is scaled.
     """
     per_scale_scores: list[list[float]] = []
     sample_ids: list[str] | None = None
@@ -111,6 +118,11 @@ def predict_scores_tta(
         ds = FreuidDataset(
             data_dir, "public_test", tf, ids=present_ids, regions_dir=regions_dir,
             return_face_meta=return_face_meta,
+            return_face_crop=return_face_crop,
+            face_crop_size=face_crop_size,
+            face_crop_margin=face_crop_margin,
+            face_crop_transform=face_crop_transform,
+            use_rectified_as_main=use_rectified_as_main,
         )
         loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
         if sample_ids is None:
@@ -218,6 +230,9 @@ def main() -> None:
     if model_type == "consistency":
         from freuid.models import build_consistency_model
         model = build_consistency_model(cfg).to(device)
+    elif model_type == "bayar_fusion":
+        from freuid.models import build_bayar_fusion_model
+        model = build_bayar_fusion_model(cfg).to(device)
     else:
         model = build_model(cfg.backbone, pretrained=False).to(device)
     model.load_state_dict(state["model"])
@@ -245,18 +260,27 @@ def main() -> None:
     base_size = data_cfg["image_size"]
     mean, std = data_cfg["mean"], data_cfg["std"]
 
-    # Regions cache: used when extra.use_rectify=True (card-rectification path).
+    # Regions cache: used when extra.use_rectify=True (card-rectification path) OR
+    # model_type=bayar_fusion (needs the cached face box for crops).
     _rdir: Path | None = None
-    if cfg.extra.get("use_rectify", False):
+    if cfg.extra.get("use_rectify", False) or model_type == "bayar_fusion":
         from freuid.preprocess import regions_dir as _get_rdir
         _rdir = _get_rdir(cfg.data_dir)
         if not _rdir.exists():
-            print(f"[infer] WARNING: use_rectify=True but cache not found at {_rdir}; using raw images")
+            print(f"[infer] WARNING: regions cache not found at {_rdir}; using raw images/no face data")
             _rdir = None
         else:
-            print(f"[infer] use_rectify=True → loading from {_rdir}")
+            print(f"[infer] loading regions cache from {_rdir}")
 
     return_face_meta = model_type == "consistency" and bool(cfg.extra.get("use_face_region", False))
+    use_rectified_as_main = cfg.extra.get("use_rectify", False)
+    overlay_cfg = cfg.extra.get("overlay", {}) if model_type == "bayar_fusion" else {}
+    return_face_crop = model_type == "bayar_fusion"
+    face_crop_size = int(overlay_cfg.get("crop_size", 224))
+    face_crop_margin = float(overlay_cfg.get("crop_margin", 0.75))
+    face_crop_transform = None
+    if return_face_crop:
+        face_crop_transform = build_transforms(face_crop_size, False, mean, std)
 
     tta_cfg = cfg.extra.get("tta", False)
     if tta_cfg:
@@ -277,6 +301,11 @@ def main() -> None:
             scales=tta_scales,
             regions_dir=_rdir,
             return_face_meta=return_face_meta,
+            return_face_crop=return_face_crop,
+            face_crop_size=face_crop_size,
+            face_crop_margin=face_crop_margin,
+            face_crop_transform=face_crop_transform,
+            use_rectified_as_main=use_rectified_as_main,
         )
         id_to_score: dict[str, float] = dict(id_score_pairs)
     else:
@@ -284,6 +313,11 @@ def main() -> None:
         ds = FreuidDataset(
             cfg.data_dir, "public_test", transform, ids=present_ids, regions_dir=_rdir,
             return_face_meta=return_face_meta,
+            return_face_crop=return_face_crop,
+            face_crop_size=face_crop_size,
+            face_crop_margin=face_crop_margin,
+            face_crop_transform=face_crop_transform,
+            use_rectified_as_main=use_rectified_as_main,
         )
         loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
         scores = predict_scores(model, loader, device)

@@ -87,6 +87,33 @@ def unpack_batch(batch):
     return imgs, labels, None
 
 
+def unpack_and_move(batch, device):
+    """unpack_batch(batch) -> (imgs, labels, face_meta_or_None, face_crop_or_None), all
+    moved to ``device``.
+
+    ``unpack_batch``'s 3rd element is either a plain face_meta tensor (consistency path,
+    unchanged) or a ``{"face_meta":..., "face_crop":...}`` dict (bayar_fusion path) --
+    this is the one place both shapes get normalised so callers (train.py, infer.py)
+    don't branch on it themselves.
+    """
+    imgs, labels, extra = unpack_batch(batch)
+    imgs = imgs.to(device)
+    if isinstance(extra, dict):
+        return imgs, labels, extra["face_meta"].to(device), extra["face_crop"].to(device)
+    face_meta_dev = extra.to(device) if extra is not None else None
+    return imgs, labels, face_meta_dev, None
+
+
+def forward_with_extras(model, imgs, face_meta=None, face_crop=None):
+    """Dispatch a model call by which extra tensors are present: (imgs, face_crop,
+    face_meta) for bayar_fusion, (imgs, face_meta) for consistency, (imgs) for baseline."""
+    if face_crop is not None:
+        return model(imgs, face_crop, face_meta)
+    if face_meta is not None:
+        return model(imgs, face_meta)
+    return model(imgs)
+
+
 def face_meta_tensor(sample: "Sample", img_size: tuple[int, int]) -> torch.Tensor:
     """Face-box fractions + validity flag for the FaceRegionHead: [x1,y1,x2,y2,valid].
 
@@ -107,9 +134,45 @@ def face_meta_tensor(sample: "Sample", img_size: tuple[int, int]) -> torch.Tenso
     )
 
 
+def face_crop_image(sample: "Sample", crop_size: int, margin: float = 0.75) -> Image.Image:
+    """Crop the cached face region (+ margin) from the rectified card, resized to a square
+    ``crop_size`` x ``crop_size`` -- the input the bayar_fusion overlay branch expects.
+
+    No new face detector is used: this crops from the SCRFD box already cached by
+    ``freuid.preprocess.precache_regions`` (``card_path``/``face_box`` on ``Sample``), the
+    same source ``face_meta_tensor`` reads. Margin matches feat/overlay-detector's own
+    ``crop_margin`` convention (fraction of box width/height added on each side).
+
+    Returns a black ``crop_size``x``crop_size`` image when there's no cached card for this
+    sample -- paired with ``face_meta_tensor``'s ``valid=0`` in that same case, the fusion
+    gate zeroes this branch's contribution regardless of the placeholder pixels, matching
+    ``FaceRegionHead``'s "no signal instead of a wrong one" convention.
+    """
+    if sample.card_path is None:
+        return Image.new("RGB", (crop_size, crop_size))
+    img = Image.open(sample.card_path).convert("RGB")
+    w, h = img.size
+    if sample.face_box is not None:
+        fb = sample.face_box
+        x1, y1, x2, y2 = fb["x1"], fb["y1"], fb["x2"], fb["y2"]
+    else:
+        x1, y1, x2, y2 = 0, 0, w, h  # regions dir present but face.json missing/corrupt
+    bw, bh = x2 - x1, y2 - y1
+    mx, my = bw * margin, bh * margin
+    x1 = max(0, int(x1 - mx))
+    y1 = max(0, int(y1 - my))
+    x2 = min(w, int(x2 + mx))
+    y2 = min(h, int(y2 + my))
+    if x2 <= x1 or y2 <= y1:
+        return Image.new("RGB", (crop_size, crop_size))
+    return img.crop((x1, y1, x2, y2)).resize((crop_size, crop_size), Image.BILINEAR)
+
+
 class FreuidDataset(Dataset):
     """Image dataset yielding (transformed_image, label), or (transformed_image, label,
-    face_meta) when ``return_face_meta=True`` (see ``face_meta_tensor``).
+    face_meta) when ``return_face_meta=True`` (see ``face_meta_tensor``), or
+    (transformed_image, label, {"face_meta":..., "face_crop":...}) when
+    ``return_face_crop=True`` (see ``face_crop_image`` -- the bayar_fusion path).
 
     Optionally restrict to a subset of ids (for train/val splits) via ``ids``.
     """
@@ -122,12 +185,27 @@ class FreuidDataset(Dataset):
         ids: set[str] | None = None,
         regions_dir: Path | None = None,
         return_face_meta: bool = False,
+        return_face_crop: bool = False,
+        face_crop_size: int = 224,
+        face_crop_margin: float = 0.75,
+        face_crop_transform=None,
+        use_rectified_as_main: bool = True,
     ) -> None:
         self.root = Path(root)
         self.split = split
         self.transform = transform
         self._regions_dir = regions_dir
         self._return_face_meta = return_face_meta
+        self._return_face_crop = return_face_crop
+        self._face_crop_size = face_crop_size
+        self._face_crop_margin = face_crop_margin
+        self._face_crop_transform = face_crop_transform
+        # Default True preserves every existing caller's behavior exactly (card_path
+        # preferred as the main image whenever regions_dir is set, e.g. use_rectify=True
+        # on the consistency path). Set False when regions_dir is only needed for face
+        # crops (bayar_fusion) so the main image stays the raw original -- otherwise
+        # enabling the regions cache would silently swap DINOv2's main input too.
+        self._use_rectified_as_main = use_rectified_as_main
         df = load_labels(self.root, split)
         if ids is not None:
             df = df[df["id"].isin(ids)]
@@ -161,13 +239,36 @@ class FreuidDataset(Dataset):
 
     def __getitem__(self, idx: int):
         s = self.samples[idx]
-        src = s.card_path if s.card_path is not None else s.path
+        src = s.path
+        if self._use_rectified_as_main and s.card_path is not None:
+            src = s.card_path
         img = Image.open(src).convert("RGB")
-        img_size = img.size  # (W, H) before transform -- the space face_box coords are in
+
+        # face_meta's box fractions are always in the rectified card's coordinate space
+        # (SCRFD ran on card.png, see preprocess.py) regardless of which image is "main" --
+        # when the main image isn't the card (use_rectified_as_main=False), its size must
+        # NOT be used for this. Re-derive the card's own size in that case.
+        if s.card_path is None:
+            face_img_size = img.size  # no cache; face_meta_tensor returns invalid regardless
+        elif src == s.card_path:
+            face_img_size = img.size
+        else:
+            with Image.open(s.card_path) as _card:
+                face_img_size = _card.size
+
+        face_crop = None
+        if self._return_face_crop:
+            face_crop = face_crop_image(s, self._face_crop_size, self._face_crop_margin)
+            if self._face_crop_transform is not None:
+                face_crop = self._face_crop_transform(face_crop)
+
         if self.transform is not None:
             img = self.transform(img)
+
+        if self._return_face_crop:
+            return img, s.label, {"face_meta": face_meta_tensor(s, face_img_size), "face_crop": face_crop}
         if self._return_face_meta:
-            return img, s.label, face_meta_tensor(s, img_size)
+            return img, s.label, face_meta_tensor(s, face_img_size)
         return img, s.label
 
     # __getitem__ / __len__ 은 파이썬의 "정해진 이름"(특수 메서드)이라, 이것만 구현하면

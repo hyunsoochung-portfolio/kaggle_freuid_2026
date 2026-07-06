@@ -19,7 +19,13 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from freuid.config import Config, load_config
-from freuid.data import FreuidDataset, lodo_split, stratified_split, unpack_batch
+from freuid.data import (
+    FreuidDataset,
+    forward_with_extras,
+    lodo_split,
+    stratified_split,
+    unpack_and_move,
+)
 from freuid.loss import combined_loss
 from freuid.metrics import evaluate
 from freuid.models import build_model
@@ -47,10 +53,8 @@ def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: floa
     total_loss, n_seen, all_scores, all_labels = 0.0, 0, [], []
     use_amp = scaler is not None and scaler.is_enabled()
     for batch in tqdm(loader, leave=False):
-        imgs, labels, face_meta = unpack_batch(batch)
-        imgs = imgs.to(device)
+        imgs, labels, face_meta_dev, face_crop_dev = unpack_and_move(batch, device)
         labels_dev = labels.to(device)
-        face_meta_dev = face_meta.to(device) if face_meta is not None else None
         # eval 모드에서는 불필요한 그래디언트 계산을 끄는 컨텍스트 매니저
         with torch.set_grad_enabled(is_train):
             amp_ctx = (
@@ -59,7 +63,7 @@ def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: floa
             )
             with amp_ctx:
                 # 모델 forward() 호출. imgs [B, 3, H, W] -> logits [B, 1] (B=batch_size)
-                logits = model(imgs, face_meta_dev) if face_meta_dev is not None else model(imgs)
+                logits = forward_with_extras(model, imgs, face_meta_dev, face_crop_dev)
                 # BCE + optional pairwise AUC term (train only; val always uses plain BCE)
                 _aw = auc_weight if is_train else 0.0
                 loss = combined_loss(logits, labels_dev, criterion, _aw)
@@ -109,28 +113,57 @@ def build_loaders(
     train_tf = build_transforms(size, True, mean, std, augment=augment)
     val_tf = build_transforms(size, False, mean, std)
 
-    # Regions cache: used when extra.use_rectify=True (consistency path with card rectification).
+    # model_type dispatch: add new model types here (e.g. model_type="bayar_fusion")
+    model_type = cfg.extra.get("model_type", "baseline")
+    overlay_cfg = cfg.extra.get("overlay", {}) if model_type == "bayar_fusion" else {}
+    return_face_crop = model_type == "bayar_fusion"
+    face_crop_size = int(overlay_cfg.get("crop_size", 224))
+    face_crop_margin = float(overlay_cfg.get("crop_margin", 0.75))
+
+    # Regions cache: used when extra.use_rectify=True (consistency path with card
+    # rectification) OR model_type=bayar_fusion (needs the cached face box for crops,
+    # regardless of use_rectify -- see use_rectified_as_main below).
     _rdir: Path | None = None
-    if cfg.extra.get("use_rectify", False):
+    if cfg.extra.get("use_rectify", False) or model_type == "bayar_fusion":
         from freuid.preprocess import regions_dir as _get_rdir
         _rdir = _get_rdir(cfg.data_dir)
         if _rdir.exists():
-            print(f"[train] use_rectify=True → loading from {_rdir}")
+            print(f"[train] loading regions cache from {_rdir}")
         else:
-            print(f"[train] WARNING: use_rectify=True but cache not found at {_rdir}; using raw images")
+            print(f"[train] WARNING: regions cache not found at {_rdir}; using raw images/no face data")
             _rdir = None
+
+    # bayar_fusion keeps DINOv2's main input as the RAW image (matching the baseline/
+    # finetune path exactly, so this experiment isolates "add an overlay branch" without
+    # also silently switching DINOv2 to see rectified cards) -- only use_rectify (the
+    # consistency path) wants the rectified card as the main image.
+    use_rectified_as_main = cfg.extra.get("use_rectify", False)
 
     # Face-region head needs (id, valid) face boxes alongside each batch. Only the
     # consistency path knows how to consume the extra tensor, so gate on model_type too.
-    model_type = cfg.extra.get("model_type", "baseline")
     return_face_meta = model_type == "consistency" and bool(cfg.extra.get("use_face_region", False))
+
+    _ds_face_kwargs = dict(
+        return_face_meta=return_face_meta,
+        return_face_crop=return_face_crop,
+        face_crop_size=face_crop_size,
+        face_crop_margin=face_crop_margin,
+        use_rectified_as_main=use_rectified_as_main,
+    )
+    # Separate recapture-style augmentation for the 224px face-crop view (bayar_fusion
+    # only) -- independent of the whole-document augmentation, a deliberate v0
+    # simplification (see CLAUDE.md/the exp/bayar+dinov2 plan for why).
+    face_crop_transform = None
+    if return_face_crop:
+        from freuid.augment import recapture_transforms as _recapture_for_crop
+        face_crop_transform = _recapture_for_crop(face_crop_size, mean, std)
 
     synth_prob = float(cfg.extra.get("synth_tamper_prob", 0.0))
     if synth_prob > 0.0:
         from freuid.augment import SynthTamperWrapper, recapture_transforms
         _base_train_ds = FreuidDataset(
             cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir,
-            return_face_meta=return_face_meta,
+            **_ds_face_kwargs,
         )
         _tamper_tf = recapture_transforms(size, mean, std)
         train_ds = SynthTamperWrapper(
@@ -139,6 +172,7 @@ def build_loaders(
             tamper_transform=_tamper_tf,
             prob=synth_prob,
             seed=cfg.seed,
+            face_crop_transform=face_crop_transform,
         )
         _n_bona = sum(1 for s in _base_train_ds.samples if s.label == 0)
         print(
@@ -149,11 +183,13 @@ def build_loaders(
     else:
         train_ds = FreuidDataset(
             cfg.data_dir, "train", train_tf, ids=train_ids, regions_dir=_rdir,
-            return_face_meta=return_face_meta,
+            face_crop_transform=face_crop_transform,
+            **_ds_face_kwargs,
         )
     val_ds = FreuidDataset(
         cfg.data_dir, "train", val_tf, ids=val_ids, regions_dir=_rdir,
-        return_face_meta=return_face_meta,
+        face_crop_transform=face_crop_transform,
+        **_ds_face_kwargs,
     )
     pin_memory = torch.cuda.is_available()  # unsupported/no-op on MPS, only helps CUDA
     train_loader = DataLoader(
@@ -188,7 +224,8 @@ def build_loaders(
         probe_tf = recapture_transforms(size, mean, std)
         probe_ds = FreuidDataset(
             cfg.data_dir, "train", probe_tf, ids=val_ids, regions_dir=_rdir,
-            return_face_meta=return_face_meta,
+            face_crop_transform=face_crop_transform,
+            **_ds_face_kwargs,
         )
         probe_loader = DataLoader(
             probe_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0,
@@ -215,10 +252,9 @@ def _check_init_loss(model, loader, device, criterion, tol: float = 0.3) -> None
     or the loss function is mis-wired.
     """
     model.eval()
-    imgs, labels, face_meta = unpack_batch(next(iter(loader)))
+    imgs, labels, face_meta, face_crop = unpack_and_move(next(iter(loader)), device)
     with torch.no_grad():
-        imgs = imgs.to(device)
-        logits = model(imgs, face_meta.to(device)) if face_meta is not None else model(imgs)
+        logits = forward_with_extras(model, imgs, face_meta, face_crop)
         loss = criterion(logits, labels.float().unsqueeze(1).to(device)).item()
     model.train()
     expected = math.log(2)  # ≈ 0.693
@@ -238,21 +274,19 @@ def _sanity_overfit(model, loader, device, criterion, steps: int = 100, target: 
     """
     import copy
     m = copy.deepcopy(model)
-    imgs, labels, face_meta = unpack_batch(next(iter(loader)))
-    imgs = imgs.to(device)
-    face_meta = face_meta.to(device) if face_meta is not None else None
+    imgs, labels, face_meta, face_crop = unpack_and_move(next(iter(loader)), device)
     targets = labels.float().unsqueeze(1).to(device)
     opt = torch.optim.SGD(m.parameters(), lr=0.1)
     m.train()
 
-    def _forward():
-        return m(imgs, face_meta) if face_meta is not None else m(imgs)
+    def _step_forward():
+        return forward_with_extras(m, imgs, face_meta, face_crop)
 
     for _ in range(steps):
         opt.zero_grad()
-        criterion(_forward(), targets).backward()
+        criterion(_step_forward(), targets).backward()
         opt.step()
-    final = criterion(_forward(), targets).item()
+    final = criterion(_step_forward(), targets).item()
     assert final < target, (
         f"sanity overfit: loss={final:.4f} after {steps} steps (target <{target}). "
         "Check: gradient flow not blocked, model has enough capacity for one batch."
@@ -294,6 +328,15 @@ def main() -> None:
     if model_type == "consistency":
         from freuid.models import build_consistency_model
         model = build_consistency_model(cfg).to(device)
+    elif model_type == "bayar_fusion":
+        from freuid.models import build_bayar_fusion_model
+        model = build_bayar_fusion_model(cfg).to(device)
+        if cfg.extra.get("grad_checkpointing", False):
+            if hasattr(model.dino, "set_grad_checkpointing"):
+                model.dino.set_grad_checkpointing(True)
+                print("[train] gradient checkpointing enabled (dino sub-module)")
+            else:
+                print(f"[train] WARNING: grad_checkpointing=True but {cfg.backbone} has no set_grad_checkpointing")
     else:
         model = build_model(cfg.backbone, cfg.pretrained).to(device)
         # Fine-tuning knobs (baseline/ViT path only; frozen consistency path untouched).
@@ -319,11 +362,19 @@ def main() -> None:
 
     llrd_cfg = cfg.extra.get("llrd") or {}
     if llrd_cfg.get("enabled", False):
-        from freuid.optim import build_llrd_param_groups, build_warmup_cosine_scheduler
-        param_groups = build_llrd_param_groups(
-            model, base_lr=cfg.lr, weight_decay=cfg.weight_decay,
-            decay=float(llrd_cfg.get("decay", 0.7)),
-        )
+        from freuid.optim import build_warmup_cosine_scheduler
+        if model_type == "bayar_fusion":
+            from freuid.models import build_bayar_fusion_param_groups
+            param_groups = build_bayar_fusion_param_groups(
+                model, base_lr=cfg.lr, weight_decay=cfg.weight_decay,
+                decay=float(llrd_cfg.get("decay", 0.7)),
+            )
+        else:
+            from freuid.optim import build_llrd_param_groups
+            param_groups = build_llrd_param_groups(
+                model, base_lr=cfg.lr, weight_decay=cfg.weight_decay,
+                decay=float(llrd_cfg.get("decay", 0.7)),
+            )
         optimizer = torch.optim.AdamW(param_groups)
         scheduler = build_warmup_cosine_scheduler(
             optimizer, cfg.epochs, warmup_epochs=int(llrd_cfg.get("warmup_epochs", 2)),
