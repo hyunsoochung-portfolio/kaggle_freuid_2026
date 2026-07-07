@@ -7,7 +7,7 @@
 #   - head_dropout:  0.1        (was unset = 0.0)
 # If this recovers toward 0.0686 -> the regression was these hyperparameters.
 # If it stays ~0.096          -> the new features (analog-double / AUC / TTA) are the cause.
-# (Everything else — epochs 10, LLRD 0.7, warmup 2, wd 0.05 — left as data_attention_10ep had it.)
+# (Everything else — LLRD 0.7, warmup 2, wd 0.05 — left as data_attention_10ep had it; epochs 12.)
 
 name: data_attention_match
 seed: 42
@@ -17,7 +17,7 @@ backbone: vit_base_patch14_dinov2.lvd142m   # matched to dinov2_v1 (removed reg4
 pretrained: true
 image_size: 518
 
-epochs: 10
+epochs: 12
 batch_size: 32
 lr: 5.0e-5                  # matched to dinov2_v1 (was 1e-4)
 weight_decay: 5.0e-2
