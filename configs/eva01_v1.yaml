@@ -1,0 +1,65 @@
+# configs/eva01_v1.yaml
+# Decisive experiment: eva01_v0 scored near-perfect locally (probe_AuDET=0.000028) but only
+# 0.10338 on public LB -- a huge gap shared by all three backbone-sweep members, and absent
+# from finetune_v0 (probe_AuDET=0.000002, public LB=0.00744) despite an equally-saturated
+# local score. Two suspects: (1) head_type=gem (amplifies whatever localized cue the model
+# leans on -- good for real forensic signal, worse for a synth-tamper-pipeline shortcut),
+# (2) no LLRD (flat LR lets fine-tuning freely rewrite early-layer pretrained features,
+# unlike finetune_v0's per-block LR decay that mostly preserves them).
+#
+# This config removes both suspects and matches finetune_v0.yaml's recipe as closely as
+# possible, changing only backbone/image_size/tta (confirm via scripts/config_diff.py) --
+# EVA-01 ViT-Large/14 has a `.blocks` attribute like DINOv2 ViT-B/14 (num_prefix_tokens=1,
+# standard timm ViT), so the exact same LLRD/warmup path applies unchanged.
+
+name: eva01_v1
+seed: 42
+data_dir: data
+
+# EVA-01 ViT-Large/14, CLS token present (num_prefix_tokens=1 -- confirmed via timm).
+backbone: eva_large_patch14_336.in22k_ft_in22k_in1k
+pretrained: true
+image_size: 336
+
+epochs: 20
+batch_size: 16       # ~304M params, largest backbone in the sweep
+lr: 1.0e-4           # matches finetune_v0's LLRD head/base LR exactly (parity, not a guess)
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  head_type: gap   # was gem in eva01_v0 -- removed as a suspect, matches finetune_v0
+
+  augment: recapture
+  synth_tamper_prob: 0.3
+  auc_loss_weight: 0.1
+
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  amp: true
+  # grad_checkpointing removed: eva_large_patch14_336 has no set_grad_checkpointing (see
+  # eva01_v0's training log warning) -- it was a silent no-op, not a real setting.
+
+  # LLRD: absent in eva01_v0, present here -- protects early-layer pretrained features
+  # from the flat-LR full-drift fine-tune that likely let eva01_v0 overfit a shortcut.
+  # Values match finetune_v0.yaml exactly.
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+
+  # TTA scales must be multiples of patch_size=14 (308=14x22, 336=14x24, 364=14x26).
+  tta: [308, 336, 364]
+
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
