@@ -38,14 +38,11 @@ choice itself.
 **Follow-up experiments off finetune_v0 — several tried since, all negative. Read before
 repeating any of these:**
 
-| attempt | change from finetune_v0 | probe_AuDET | public LB | verdict |
-| --- | --- | --- | --- | --- |
-| `finetune_v1` | DINOv3 ViT-B/16 backbone swap, otherwise identical recipe | — | 0.02695 | ~3.6x worse |
-| `finetune_v2` | 784px instead of 518px, otherwise byte-identical config | 0.000000 (ep18) | 0.00750 | wash (noise-level) |
-| `bayar_dinov2_v0` | gated fusion with a BayarConv2d forensic-noise + face-crop branch, fine-tuned jointly | 0.0 (exact) | 0.02146 | ~2.9x worse |
-| overlay ensemble — hard gate | override finetune_v0 with a standalone forensic-noise model's raw score on ~305 uncertain ids | n/a | 0.01101 | ~1.5x worse |
-| overlay ensemble — weighted blend, hesitant subset | weighted rank-blend restricted to the ~300 most uncertain ids (had a local/global rank-scale bug) | n/a | 0.01659 | ~2.2x worse |
-| overlay ensemble — weighted blend, all ids | weighted rank-blend (0.8/0.2) across all present ids | n/a | 0.05319 | ~7.1x worse |
+| attempt           | change from finetune_v0                                                               | probe_AuDET     | public LB | verdict            |
+| ----------------- | ------------------------------------------------------------------------------------- | --------------- | --------- | ------------------ |
+| `finetune_v1`     | DINOv3 ViT-B/16 backbone swap, otherwise identical recipe                             | —               | 0.02695   | ~3.6x worse        |
+| `finetune_v2`     | 784px instead of 518px, otherwise byte-identical config                               | 0.000000 (ep18) | 0.00750   | wash (noise-level) |
+| `bayar_dinov2_v0` | gated fusion with a BayarConv2d forensic-noise + face-crop branch, fine-tuned jointly | 0.0 (exact)     | 0.02146   | ~2.9x worse        |
 
 Details worth keeping:
 
@@ -69,7 +66,7 @@ Details worth keeping:
   RGB-ResNet34 branch on a cached-SCRFD face crop, fully fine-tuned end-to-end with recapture
   augmentation applied to both streams. The local probe hit an exact 0.0, and the checkpoint
   genuinely learned to rely on the branch (100% of the gate's 640 elements moved >10x from
-  init) — that reliance is *why* it overfit, not evidence the branch stayed inert.
+  init) — that reliance is _why_ it overfit, not evidence the branch stayed inert.
   Most-to-least confident root causes: (1) the extra branch is pure added capacity to fit the
   closed train/val/probe loop without that fit needing to generalize; (2) the recapture
   augmentation applied to the face-crop stream (JPEG recompress/blur/noise/downscale, built to
@@ -79,16 +76,6 @@ Details worth keeping:
   secondary, train/test mismatch. **Do not retry this fusion family** (BayarConv2d/SRM-style
   noise-residual branches jointly trained under recapture augmentation) without a specific new
   idea for resolving the augmentation-vs-noise-signal conflict.
-- **Overlay ensembles**: a separate forensic-noise + face model (BayarConv2d stream, ResNet34
-  RGB stream, MLP fusion, 224px MTCNN face crop, **zero recapture/reprint augmentation** in its
-  own training pipeline) scores decisively on finetune_v0's most-uncertain present-test
-  predictions (91-95% confident calls, holding flat through rank 300) — mechanistically
-  sensible, since its forensic-noise signal was never trained to survive a reprint but still
-  fires on genuinely-digital (not-yet-reprinted) manipulations. But every fixed-weight or
-  fixed-override combination tried made the public LB worse: rank metrics punish a
-  confidently-wrong call (pushed to 0.99+) far more than they punish an ambiguous 0.5, so
-  *decisiveness* on an uncertain zone doesn't imply *correctness*, and none of these
-  combinations could tell which of the second model's calls to trust.
 
 Two different second-branch/second-model ideas (the frozen consistency heads described in
 Models below, and this fusion/ensemble line) have now each looked promising in some narrow
@@ -167,11 +154,11 @@ Everything above is a general vision / segmentation / face model.
 
 Per-epoch compass is the **recapture probe** (analog augmentation applied to a held-out clean
 split; checkpoint on lowest probe AuDET). **Known limits, respect them**: the probe applies the
-_training_ augmentation, so it is partially circular, and it is **saturated** — finetune_v0 hit
+_training_ augmentation, so it is partially circular, and it is **saturated** — finetune*v0 hit
 2e-6, finetune_v2's best epoch hit exact `0.0`, and `bayar_dinov2_v0` also hit exact `0.0` right
 before regressing ~2.9x on the public LB. That last case matters: the probe isn't just
 low-resolution between two good candidates (its known limit) — it can be **completely blind to
-a real regression**. It has agreed with the LB in *direction* on every submission so far, so
+a real regression**. It has agreed with the LB in \_direction* on every submission so far, so
 keep it as a regression gate, but don't trust it to rank two good candidates against each other.
 Don't trust single-domain LODO on the easiest type either — it saturates the same way. Periodic
 multi-fold LODO (hold out each document type in turn) is the cross-domain check. Sanity checks
@@ -180,7 +167,7 @@ per the Invariants section.
 **Closing this gap is the highest-priority validation task.** Three instruments exist so far,
 none sufficient alone:
 
-- `scripts/analysis/nondigital_probe.py` scores checkpoints against the only 20 *real*
+- `scripts/analysis/nondigital_probe.py` scores checkpoints against the only 20 _real_
   non-digital (print-and-capture) training images. Caveat: 18/20 sit inside every checkpoint's
   training split (same seed=42 split across configs) — only 2 are genuine holdouts, both
   fraud, both correctly and confidently flagged (0.978–1.000) by every checkpoint tried so far.
@@ -190,7 +177,7 @@ none sufficient alone:
   split through mechanisms `recapture_transforms` does **not** model at all — halftone/moiré,
   vignetting, specular glare, chromatic aberration, barrel distortion, shot+dust noise,
   posterization, a harsher single-pass JPEG — specifically to catch what the saturated,
-  circular recapture probe cannot: a checkpoint that generalizes only to the *trained*
+  circular recapture probe cannot: a checkpoint that generalizes only to the _trained_
   perturbation family rather than to print-and-capture degradation in general. Built directly
   in response to the `bayar_dinov2_v0` blind spot above. Status: smoke-tested on CPU (n=12,
   `finetune_v2`) — the degradation is visually non-trivial/legible and AuDET reads non-zero
@@ -198,10 +185,10 @@ none sufficient alone:
   pass via `--max-images`) and hasn't happened yet.
 - `scripts/analysis/hesitant_test_images.py` + `notebooks/hesitant_test_images.ipynb` pull the
   present-test ids whose rank-averaged score sits closest to 0.5 for manual inspection. Useful
-  for spotting *systematic* error patterns (a document type, a tamper style) worth targeted
+  for spotting _systematic_ error patterns (a document type, a tamper style) worth targeted
   augmentation — not a numeric ranking instrument by itself. Note: submission scores are
   rank-averaged, so their marginal distribution is close to uniform on (0,1) by construction —
-  "score near 0.5" means *median relative rank*, not necessarily *raw sigmoid ≈ 50/50*.
+  "score near 0.5" means _median relative rank_, not necessarily _raw sigmoid ≈ 50/50_.
 
 ## Leaderboard & next-step priorities
 
@@ -213,18 +200,18 @@ already on the VESSL box at `~/.kaggle/kaggle.json`). Scores cluster tightly aro
 (rank 32 = 0.00721, rank 34 = 0.00800) — small gains move several ranks; the big gap is to the
 top ~10-15 teams (best is 0.00039), not to us specifically.
 
-Since AuDET/APCER@1%BPCER are pure rank/threshold-sweep metrics (score *distribution shape*
+Since AuDET/APCER@1%BPCER are pure rank/threshold-sweep metrics (score _distribution shape_
 truly doesn't matter, only pairwise ordering — see the FREUID formula in the Project section),
 the next-step priorities in rough order:
 
 1. **Run `probe_v2` at scale.** It exists and is smoke-tested but hasn't run a full val split
    against the trained checkpoints yet — do that on VESSL next. Urgency comes from
    `bayar_dinov2_v0`: the local probe hit an exact, saturated 0.0 and the public LB still came
-   back ~2.9x *worse* than finetune_v0 — the local instrument wasn't just low-resolution
+   back ~2.9x _worse_ than finetune_v0 — the local instrument wasn't just low-resolution
    between good candidates, it was blind to a real regression. Every idea below faces the same
    blind spot until this instrument is running at scale.
 2. **Loss-level: target APCER@1%BPCER specifically.** The pairwise soft-AUC term
-   (`auc_loss_weight=0.1`) optimizes the *full* curve; APCER@1%BPCER is a partial-AUC metric that
+   (`auc_loss_weight=0.1`) optimizes the _full_ curve; APCER@1%BPCER is a partial-AUC metric that
    only cares about the strict tail near the 99th-percentile bona-fide threshold. A full-curve
    loss doesn't specifically push on that tail — consider a higher `auc_loss_weight`, or a
    partial-AUC / hard-negative-mining term focused on pairs near that boundary.
@@ -232,7 +219,7 @@ the next-step priorities in rough order:
    architecture) before reaching for cross-architecture ensembling.
 4. **ViT-L or a retrained ConvNeXt** as genuine cross-architecture ensemble members (feasibility
    already confirmed for ViT-L, see Models section).
-5. Inspect the hesitant-images notebook output for *systematic* (not random) error patterns to
+5. Inspect the hesitant-images notebook output for _systematic_ (not random) error patterns to
    target with augmentation/curriculum changes. This is how the `bayar_dinov2_v0`/overlay line
    of investigation started (see above) — don't repeat that specific fusion family, but a
    different systematic pattern found this way is still worth a fresh look.
@@ -308,6 +295,6 @@ and per-class counts at train start. Keep every `model_type` path importable and
 - `scripts/config_diff.py` — resolved-config diff tool; verify a new experiment config changes
   only what it claims to
 - `scripts/analysis/{degradation_curves,per_slice_metrics,representation_drift,
-  score_distribution_audit,shortcut_probe,tamper_bbox,visualize}.py` — additional finetune_v0
+score_distribution_audit,shortcut_probe,tamper_bbox,visualize}.py` — additional finetune_v0
   diagnostics (robustness curves, per-slice metrics, representation drift, score distribution,
   shortcut-feature probing, tamper localization, attention/attribution visualization)
