@@ -5,7 +5,20 @@ Everything here runs single-process -- detectors are not fork-safe.
 
 Cache layout under {data_dir}/processed/regions/{id}/:
     card.png   — rectified 512×512 card (warpPerspective or resize fallback)
-    face.json  — portrait bbox in canonical card coords, or center-square fallback
+    face.json  — portrait bbox in the ORIGINAL image's pixel coords (see note below), or
+                 center-square fallback in that same space
+
+Face detection runs on the ORIGINAL image, not on card.png. This dataset is ~99.97% digital
+and its raw images are already full-frame photos of the card -- there is usually no distinct
+card-vs-background boundary for FastSAM's "largest quad" heuristic to find, so it locks onto
+whatever internal graphic happens to form the cleanest rectangle instead (a flag watermark, a
+barcode strip, a photo-frame border -- see the scrfd_coverage.py audit + visual check that
+found this: 3 of 5 major train document types rectified to ~0% real detections because
+rectify_card was warping onto a flag graphic every single time, not the card). Running SCRFD
+directly on the original image sidesteps that failure mode entirely and was verified to detect
+the same "0% detected" documents' faces at 0.85-0.91 confidence. rectify_card()/card.png are
+kept only for the parked use_rectify consistency path, which wants a canonical card view as
+DINOv2's main input for a different reason -- face detection no longer depends on it.
 
 Usage (CLI):
     python -m freuid.preprocess --config configs/consistency.yaml \\
@@ -182,9 +195,12 @@ def detect_face_box(image: np.ndarray) -> dict:
     """SCRFD → most-confident portrait box; fallback: center square of 0.6·min(H,W).
 
     Args:
-        image: HWC uint8 RGB array (after card rectification).
+        image: HWC uint8 RGB array. Pass the ORIGINAL (non-rectified) image -- see the
+            module docstring for why running this on rectify_card()'s output is unreliable
+            for this dataset.
 
-    Returns a dict with keys x1, y1, x2, y2 (int, pixel coords) and score (float).
+    Returns a dict with keys x1, y1, x2, y2 (int, pixel coords in `image`'s own space) and
+    score (float; 0.0 marks the fallback box as a non-detection).
     """
     app = _load_scrfd()
     if app is not None:
@@ -269,7 +285,13 @@ def precache_regions(
                 card = rectify_card(rgb)
                 cv2.imwrite(str(card_path), cv2.cvtColor(card, cv2.COLOR_RGB2BGR))
 
-                face = detect_face_box(card)  # coords in canonical card space
+                # Detect on the ORIGINAL image, not `card` -- see module docstring.
+                # rectify_card's quad-selection has no face-specific knowledge and, for the
+                # already-full-frame photos that make up ~all of this dataset, frequently
+                # warps onto a decorative sub-element (a flag watermark, a barcode) instead
+                # of the card, silently producing a face-free crop for SCRFD to (correctly)
+                # fail on.
+                face = detect_face_box(rgb)  # coords in the ORIGINAL image's space
                 face_path.write_text(json.dumps(face))
 
                 n_done += 1

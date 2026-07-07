@@ -117,12 +117,15 @@ def forward_with_extras(model, imgs, face_meta=None, face_crop=None):
 def face_meta_tensor(sample: "Sample", img_size: tuple[int, int]) -> torch.Tensor:
     """Face-box fractions + validity flag for the FaceRegionHead: [x1,y1,x2,y2,valid].
 
-    ``img_size`` is the (W, H) of the image actually opened for this sample (the
-    rectified card when ``card_path`` is set) -- the space the cached face box is in.
+    ``img_size`` is the (W, H) of the ORIGINAL image for this sample -- SCRFD runs on the
+    original image, not the rectified card (see freuid.preprocess's module docstring: for
+    the mostly-already-full-frame photos in this dataset, rectify_card's "largest quad"
+    heuristic frequently warps onto a decorative sub-element -- a flag watermark, a barcode
+    -- instead of the card, so face detection no longer depends on its output).
     Returns an all-zero (invalid) tensor when there's no cached box, or when the box
     is the center-square fallback (SCRFD ``score`` == 0, i.e. no real detection).
     """
-    if sample.card_path is None or sample.face_box is None:
+    if sample.face_box is None:
         return torch.zeros(FACE_META_DIM, dtype=torch.float32)
     fb = sample.face_box
     if float(fb.get("score", 0.0)) <= 0.0:
@@ -135,28 +138,26 @@ def face_meta_tensor(sample: "Sample", img_size: tuple[int, int]) -> torch.Tenso
 
 
 def face_crop_image(sample: "Sample", crop_size: int, margin: float = 0.75) -> Image.Image:
-    """Crop the cached face region (+ margin) from the rectified card, resized to a square
+    """Crop the cached face region (+ margin) from the ORIGINAL image, resized to a square
     ``crop_size`` x ``crop_size`` -- the input the bayar_fusion overlay branch expects.
 
     No new face detector is used: this crops from the SCRFD box already cached by
-    ``freuid.preprocess.precache_regions`` (``card_path``/``face_box`` on ``Sample``), the
-    same source ``face_meta_tensor`` reads. Margin matches feat/overlay-detector's own
-    ``crop_margin`` convention (fraction of box width/height added on each side).
+    ``freuid.preprocess.precache_regions`` (``face_box`` on ``Sample``, detected on the
+    original image -- see freuid.preprocess's module docstring), the same source
+    ``face_meta_tensor`` reads. Margin matches feat/overlay-detector's own ``crop_margin``
+    convention (fraction of box width/height added on each side).
 
-    Returns a black ``crop_size``x``crop_size`` image when there's no cached card for this
+    Returns a black ``crop_size``x``crop_size`` image when there's no cached box for this
     sample -- paired with ``face_meta_tensor``'s ``valid=0`` in that same case, the fusion
     gate zeroes this branch's contribution regardless of the placeholder pixels, matching
     ``FaceRegionHead``'s "no signal instead of a wrong one" convention.
     """
-    if sample.card_path is None:
+    if sample.face_box is None:
         return Image.new("RGB", (crop_size, crop_size))
-    img = Image.open(sample.card_path).convert("RGB")
+    img = Image.open(sample.path).convert("RGB")
     w, h = img.size
-    if sample.face_box is not None:
-        fb = sample.face_box
-        x1, y1, x2, y2 = fb["x1"], fb["y1"], fb["x2"], fb["y2"]
-    else:
-        x1, y1, x2, y2 = 0, 0, w, h  # regions dir present but face.json missing/corrupt
+    fb = sample.face_box
+    x1, y1, x2, y2 = fb["x1"], fb["y1"], fb["x2"], fb["y2"]
     bw, bh = x2 - x1, y2 - y1
     mx, my = bw * margin, bh * margin
     x1 = max(0, int(x1 - mx))
@@ -244,17 +245,15 @@ class FreuidDataset(Dataset):
             src = s.card_path
         img = Image.open(src).convert("RGB")
 
-        # face_meta's box fractions are always in the rectified card's coordinate space
-        # (SCRFD ran on card.png, see preprocess.py) regardless of which image is "main" --
-        # when the main image isn't the card (use_rectified_as_main=False), its size must
-        # NOT be used for this. Re-derive the card's own size in that case.
-        if s.card_path is None:
-            face_img_size = img.size  # no cache; face_meta_tensor returns invalid regardless
-        elif src == s.card_path:
+        # face_box's coordinates are always in the ORIGINAL image's space (SCRFD runs on
+        # the raw image, not card.png -- see preprocess.py's module docstring) regardless
+        # of which image is "main" here. When the main image is the rectified card instead
+        # (use_rectified_as_main=True), re-derive the raw image's own size for the fractions.
+        if src == s.path:
             face_img_size = img.size
         else:
-            with Image.open(s.card_path) as _card:
-                face_img_size = _card.size
+            with Image.open(s.path) as _raw:
+                face_img_size = _raw.size
 
         face_crop = None
         if self._return_face_crop:
