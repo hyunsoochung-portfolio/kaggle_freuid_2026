@@ -257,16 +257,15 @@ class SynthTamperWrapper(Dataset):
         img_pil = Image.open(src).convert("RGB")
         label = sample.label
 
-        # face_meta's box fractions are always in the rectified card's coordinate space --
-        # re-derive the card's own size when it isn't what "src" opened. See the matching
-        # comment in FreuidDataset.__getitem__ (data.py).
-        if sample.card_path is None:
-            img_size = img_pil.size
-        elif src == sample.card_path:
+        # face_box's coordinates are always in the ORIGINAL image's space (see
+        # preprocess.py's module docstring) -- re-derive the raw image's own size when it
+        # isn't what "src" opened. See the matching comment in FreuidDataset.__getitem__
+        # (data.py).
+        if src == sample.path:
             img_size = img_pil.size
         else:
-            with Image.open(sample.card_path) as _card:
-                img_size = _card.size
+            with Image.open(sample.path) as _raw:
+                img_size = _raw.size
 
         if label == 0 and self._rng.random() < self.prob:
             arr = np.array(img_pil)
