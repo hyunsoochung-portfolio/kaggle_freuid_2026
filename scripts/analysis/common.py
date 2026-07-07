@@ -18,7 +18,7 @@ from PIL import Image
 
 from freuid.config import Config
 from freuid.data import load_labels, lodo_split, stratified_split
-from freuid.models import build_model
+from freuid.models import build_model, build_model_for_config
 from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device
 
@@ -53,8 +53,9 @@ def split_dataframe(cfg: Config, ids: set[str]) -> pd.DataFrame:
 
 
 def build_finetuned_model(cfg: Config, state: dict, device) -> torch.nn.Module:
-    """The actual finetune_v0 model: architecture from cfg.backbone, fine-tuned weights loaded."""
-    model = build_model(cfg.backbone, pretrained=False).to(device)
+    """The checkpoint's own model (dispatched on cfg.extra["model_type"]: baseline / consistency
+    / bayar_fusion), with its fine-tuned weights loaded."""
+    model = build_model_for_config(cfg).to(device)
     model.load_state_dict(state["model"])
     model.eval()
     return model
