@@ -28,6 +28,16 @@ trusting absolute values (see the caveat in `metrics.py`).
 
 > Convention used throughout: **label 1 = fraud/attack, 0 = bona-fide**; score = P(fraud).
 
+## Approach
+
+The current (and only) trained model is **`finetune_v0`**: a DINOv2 ViT-B/14 backbone
+(`vit_base_patch14_reg4_dinov2.lvd142m`, via [timm](https://github.com/huggingface/pytorch-image-models)),
+**fully fine-tuned end-to-end** (not frozen) at 518px, with layer-wise LR decay + AMP, trained
+under a print-and-capture ("analog hole") recapture-augmentation pipeline plus synthetic
+tamper injection. See [configs/finetune_v0.yaml](configs/finetune_v0.yaml) for the exact recipe
+and [docs/workflow.md](docs/workflow.md) for how to train/infer/submit it (or a variant of it)
+yourself.
+
 ## Key dates
 
 - Full dataset release: **June 2026** (released — data is live on Kaggle)
@@ -44,7 +54,8 @@ To stay eligible for prizes a team must ship, alongside final predictions:
 - **Source code under an OSI-approved open-source license** (this repo: Apache-2.0).
 - **All config + training + inference scripts**, reproducible enough for organizers to
   re-run the ranked result.
-- A **technical report** (see `report/`).
+- A **technical report**, drafted locally in `report/` (gitignored) and finalized before the
+  submission deadline.
 
 So: deterministic seeds, pinned environment, config-driven runs, and a clean
 `train → infer → submission` path are requirements, not nice-to-haves.
@@ -125,17 +136,18 @@ data/
 ## Layout
 
 ```
-configs/            # experiment configs (yaml) — one per run, committed
+configs/            # experiment configs (yaml) — one per run, committed; currently just finetune_v0.yaml
 data/               # competition data — GITIGNORED, never commit (proprietary, non-commercial)
 notebooks/          # exploration; clear outputs before committing
-report/             # technical report (mandatory deliverable)
-scripts/            # data download & helper scripts
+report/             # technical report (mandatory deliverable) — GITIGNORED, local-only until final
+scripts/            # data download & analysis scripts (scripts/analysis/ = validation instruments)
 src/freuid/
 ├── config.py       # config loading (one yaml per experiment)
 ├── data.py         # dataset / dataloaders (resolves the double-nested layout)
 ├── transforms.py   # image transforms / augmentation
+├── augment.py      # print-and-capture recapture augmentation + synthetic tamper injection
 ├── metrics.py      # AuDET + APCER@BPCER (offline ranking)
-├── models/         # model definitions (baseline.py: timm backbone + 1 fraud logit)
+├── models/         # model definitions (baseline.py: timm backbone + 1 fraud logit — finetune_v0's path)
 ├── train.py        # training entrypoint  (uv run python -m freuid.train --config ...)
 ├── infer.py        # inference → submission csv
 └── utils.py        # seeding, reproducibility helpers
@@ -144,8 +156,9 @@ submissions/        # generated submission csvs — GITIGNORED
 
 ## Team workflow
 
-- `main` stays runnable. Work on `feat/<name>` branches → PR → review → merge.
-- One experiment = one `configs/*.yaml`. Log results in `report/experiments.md`.
+- `main` stays runnable. Work on `feat/<name>` or `exp/<name>` branches → PR → review → merge.
+- One experiment = one `configs/*.yaml`. Log results locally in `report/experiments.md`
+  (gitignored) or in `CLAUDE.md`'s results table.
 - Gate every idea on the **local AuDET / APCER@1%BPCER** before burning a Kaggle submission.
 - Merge Kaggle teams **before the team-merge deadline** (submission quota becomes shared).
 
