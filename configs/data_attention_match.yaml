@@ -1,0 +1,39 @@
+# configs/data_attention_match.yaml
+# A/B step. Takes data_attention_10ep (public 0.0958) and matches dinov2_v1 (public 0.0686)
+# on the 3 red-flag differences, while KEEPING the new pipeline (analog-double data,
+# AUC ranking loss, multi-scale TTA):
+#   - backbone:      drop reg4  -> vit_base_patch14_dinov2 (was ..._reg4_dinov2)
+#   - lr:            5e-5       (was 1e-4)
+#   - head_dropout:  0.1        (was unset = 0.0)
+# If this recovers toward 0.0686 -> the regression was these hyperparameters.
+# If it stays ~0.096          -> the new features (analog-double / AUC / TTA) are the cause.
+# (Everything else — epochs 10, LLRD 0.7, warmup 2, wd 0.05 — left as data_attention_10ep had it.)
+
+name: data_attention_match
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m   # matched to dinov2_v1 (removed reg4 variant)
+pretrained: true
+image_size: 518
+
+epochs: 10
+batch_size: 32
+lr: 5.0e-5                  # matched to dinov2_v1 (was 1e-4)
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1          # label×type stratified split
+
+extra:
+  pool: map                # attention-pool head
+  head_dropout: 0.1        # matched to dinov2_v1 (was 0.0)
+  auc_loss_weight: 0.1     # kept (new)
+  tta: [476, 518, 560]     # kept (new)
+  missing_id_score: 0.5
+
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true
