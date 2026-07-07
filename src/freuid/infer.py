@@ -278,9 +278,12 @@ def main() -> None:
     return_face_crop = model_type == "bayar_fusion"
     face_crop_size = int(overlay_cfg.get("crop_size", 224))
     face_crop_margin = float(overlay_cfg.get("crop_margin", 0.75))
+    # Bare ToTensor -> [0,1]-scaled float; OverlayStream normalizes internally for its own
+    # RGB branch (see its docstring). build_transforms(..., mean, std) would double-normalize.
     face_crop_transform = None
     if return_face_crop:
-        face_crop_transform = build_transforms(face_crop_size, False, mean, std)
+        from torchvision.transforms import ToTensor as _ToTensor
+        face_crop_transform = _ToTensor()
 
     tta_cfg = cfg.extra.get("tta", False)
     if tta_cfg:

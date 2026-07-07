@@ -150,13 +150,15 @@ def build_loaders(
         face_crop_margin=face_crop_margin,
         use_rectified_as_main=use_rectified_as_main,
     )
-    # Separate recapture-style augmentation for the 224px face-crop view (bayar_fusion
-    # only) -- independent of the whole-document augmentation, a deliberate v0
-    # simplification (see CLAUDE.md/the exp/bayar+dinov2 plan for why).
+    # No degradation on the 224px face-crop view (bayar_fusion only): recapture-style
+    # augmentation erases the fine noise residue BayarConv2d depends on, defeating the
+    # branch before it can learn anything from it. Bare ToTensor -> [0,1]-scaled float;
+    # OverlayStream normalizes internally for its own RGB branch (see its docstring) --
+    # nothing upstream should pre-normalize this tensor.
     face_crop_transform = None
     if return_face_crop:
-        from freuid.augment import recapture_transforms as _recapture_for_crop
-        face_crop_transform = _recapture_for_crop(face_crop_size, mean, std)
+        from torchvision.transforms import ToTensor as _ToTensor
+        face_crop_transform = _ToTensor()
 
     synth_prob = float(cfg.extra.get("synth_tamper_prob", 0.0))
     if synth_prob > 0.0:
