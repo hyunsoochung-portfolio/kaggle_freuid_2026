@@ -134,9 +134,14 @@ def main() -> None:
         face_crop_size = int(overlay_cfg.get("crop_size", 224))
         face_crop_margin = float(overlay_cfg.get("crop_margin", 0.75))
         # Degrade the face-crop stream through the same probe_v2 chain (its own instance, at
-        # the crop's own size) rather than leaving it pristine -- bayar_fusion trained with
-        # recapture augmentation applied to both streams, so this stays a fair test of it.
-        face_crop_transform = probe_v2_transforms(face_crop_size, mean, std) if return_face_crop else None
+        # the crop's own size) rather than leaving it pristine -- training no longer degrades
+        # this stream (recapture-style augmentation erases BayarConv2d's noise residual), but
+        # a real analog-hole test image's face region is degraded regardless of training
+        # policy, so this is exactly the gap that needs testing. normalize=False: OverlayStream
+        # normalizes internally (see its docstring); doubling it up here would be wrong.
+        face_crop_transform = (
+            probe_v2_transforms(face_crop_size, mean, std, normalize=False) if return_face_crop else None
+        )
 
         # Fixed seed -> identical degraded images across checkpoints (fair comparison), and
         # reproducible across script runs, matching freuid.train._run_probe's convention.

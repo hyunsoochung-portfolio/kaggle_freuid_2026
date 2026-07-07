@@ -158,16 +158,24 @@ _STEPS = [
 
 
 class Probe2Transform:
-    """PIL Image -> normalized CHW tensor, applying the probe_v2 degradation chain.
+    """PIL Image -> CHW tensor, applying the probe_v2 degradation chain.
 
     Same call contract as `freuid.augment._AlbumentationsTransform` (and therefore a drop-in
     replacement for `recapture_transforms` anywhere that expects a callable transform).
+
+    ``normalize=True`` (default) ImageNet-normalizes the result, for the main DINOv2 input.
+    ``normalize=False`` instead scales to a bare [0,1] float tensor with no mean/std shift --
+    for bayar_fusion's face-crop stream, whose OverlayStream normalizes internally for its
+    own RGB branch (see its docstring); normalizing here too would double-normalize it.
     """
 
     def __init__(self, image_size: int, mean: tuple[float, float, float],
-                 std: tuple[float, float, float]) -> None:
+                 std: tuple[float, float, float], normalize: bool = True) -> None:
         self.image_size = image_size
-        self._normalize = A.Compose([A.Normalize(mean=mean, std=std), ToTensorV2()])
+        if normalize:
+            self._finalize = A.Compose([A.Normalize(mean=mean, std=std), ToTensorV2()])
+        else:
+            self._finalize = A.Compose([A.ToFloat(max_value=255.0), ToTensorV2()])
 
     def __call__(self, img) -> torch.Tensor:
         arr = np.array(img.convert("RGB"))
@@ -175,10 +183,10 @@ class Probe2Transform:
         for step, prob in _STEPS:
             if random.random() < prob:
                 arr = step(arr)
-        return self._normalize(image=arr)["image"]
+        return self._finalize(image=arr)["image"]
 
 
 def probe_v2_transforms(image_size: int, mean: tuple[float, float, float],
-                         std: tuple[float, float, float]) -> Probe2Transform:
+                         std: tuple[float, float, float], normalize: bool = True) -> Probe2Transform:
     """Build a probe_v2 transform -- mirrors `recapture_transforms`'s signature exactly."""
-    return Probe2Transform(image_size, mean, std)
+    return Probe2Transform(image_size, mean, std, normalize=normalize)
