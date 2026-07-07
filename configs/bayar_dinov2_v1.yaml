@@ -1,0 +1,139 @@
+# configs/bayar_dinov2_v1.yaml
+# Retrain of bayar_dinov2_v0 under the fixed face-crop pipeline. v0 regressed ~2.9x on the
+# public LB (probe_AuDET hit an exact, saturated 0.0 locally) with three suspected causes,
+# most-to-least confident: (1) the overlay branch is pure added capacity that let the model
+# fit the closed train/val/probe loop without needing to generalize; (2) recapture
+# augmentation applied to the face-crop stream erased the fine noise residue BayarConv2d
+# depends on; (3) SCRFD only found a real face on the rectified card ~1 in 5 times.
+#
+# Since v0, two bugs were found and fixed in the face-crop pipeline itself (none of this
+# changes the model architecture or the three causes above):
+#   - SCRFD was running on rectify_card()'s FastSAM-rectified output, not the original
+#     image. For this ~99.97%-digital dataset the raw images are already full-frame card
+#     photos with no distinct card-vs-background edge for FastSAM's "largest quad"
+#     heuristic to find, so it was locking onto whatever internal graphic formed the
+#     cleanest rectangle instead (a flag watermark, a barcode strip) -- 3 of 5 major
+#     document types detected a real face ~0% of the time as a result. Fixed: SCRFD now
+#     runs on the original image directly. Verified: train detection 21.5% -> 100.0%,
+#     public_test 16.4% -> 99.9% (scripts/analysis/scrfd_coverage.py). The entire regions
+#     cache was regenerated under the fix before this config's first run.
+#   - The face-crop stream was (a) always degraded through recapture_transforms during
+#     training -- directly cause (2) above -- and (b) double-normalized: OverlayStream
+#     normalizes internally for its own RGB branch, but the dataset-side transform was
+#     ALSO ImageNet-normalizing before that, feeding it a garbage-scale input regardless of
+#     the degradation question. Fixed: the face crop now gets a bare ToTensor() only
+#     (no degradation, no pre-normalization) at both train and inference time.
+#
+# This config is otherwise IDENTICAL to bayar_dinov2_v0.yaml -- same architecture, same LLRD
+# schedule, same TTA -- with one deliberate additional change on top of the face-crop pipeline
+# fix: extra.synth_tamper_prob is 0 here (was 0.3 in v0). This means the run no longer isolates
+# a single variable vs. v0 -- it bundles the face-crop pipeline fix with removing synthetic
+# tampering, a separate, explicit choice (not an oversight). Real fraud examples already make
+# up 42% of the training set (29,347 rows), so synthetic tampering was never needed for volume;
+# it was removed here because its uniform-random tamper placement doesn't reflect the
+# face-region tampering pattern seen in the hesitant-predictions review, and may have been
+# teaching the model to key on placement-agnostic tamper artifacts unrelated to the real
+# pattern. It does NOT address suspected causes (1) or (2)'s underlying capacity/overfitting
+# concern; a regression here would implicate those, not the fixes above. Confirm via
+# `python scripts/config_diff.py configs/bayar_dinov2_v0.yaml configs/bayar_dinov2_v1.yaml`
+# (only `name` and `extra.synth_tamper_prob` should differ) once v0's config is available to
+# diff against (it was pruned from this branch; retrieve via
+# `git show origin/exp/bayar+dinov2:configs/bayar_dinov2_v0.yaml`).
+#
+# probe_v2 note: scripts/analysis/probe_v2.py is NOT invoked by this config or by train.py/
+# infer.py at all (verified: zero references to "probe_v2" in either file) -- it's a standalone
+# script run manually against a checkpoint after training. The extra.use_recapture_probe /
+# extra.recapture_probe_seed / extra.checkpoint_metric keys below configure a different,
+# separate in-loop "recapture probe" used for checkpointing -- easy to conflate by name, but
+# unrelated to probe_v2.
+
+name: bayar_dinov2_v1
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size:
+  32 # unchanged from bayar_dinov2_v0; revisit if the extra overlay-stream memory doesn't fit
+lr:
+  1.0e-4 # unchanged from bayar_dinov2_v0 (LLRD head/base LR; also the base LR for the new
+  # overlay/gate/fusion params -- see build_bayar_fusion_param_groups)
+weight_decay: 5.0e-2 # unchanged from bayar_dinov2_v0
+num_workers: 8 # face crops come from the already-cached SCRFD regions (face.json), no live
+# detector in the training loop -- fully fork-safe, same worker count as bayar_dinov2_v0
+
+val_fraction: 0.1
+
+extra:
+  # --- Model type + overlay-branch config -- unchanged from bayar_dinov2_v0 ---
+  model_type: bayar_fusion
+
+  overlay: # -> cfg.extra["overlay"], read by build_bayar_fusion_model / FreuidDataset
+    crop_size: 224 # matches feat/overlay-detector's own input size
+    crop_margin: 0.75 # matches feat/overlay-detector's own crop_margin
+    noise_feat_dim: 128
+    rgb_backbone: resnet34
+    rgb_pretrained: true
+    fusion_dropout: 0.3
+    fusion_gate_init: 1.0e-3 # LayerScale-style near-zero init, same as ConsistencyHead's
+    # patch_gate/face_gate -- starts close to DINOv2-only behavior, "opens" the overlay
+    # pathway only as it earns its keep (see the S3 postmortem in CLAUDE.md)
+
+  # Augmentation: print-and-capture pipeline (no flip) for the whole-document view --
+  # unchanged from bayar_dinov2_v0. The face-crop view is NO LONGER degraded here (see
+  # header): src/freuid/train.py now hardcodes a bare ToTensor() for it regardless of this
+  # setting, so there is no config flag to flip for that -- it's a pipeline fix, not an
+  # experimental knob.
+  augment: recapture
+
+  # Synthetic tamper: DISABLED (was 0.3 in v0) -- see header for why. Real fraud examples
+  # (29,347 rows, 42% of train) already provide ample fraud-class volume; the uniform-random
+  # tamper placement this generates doesn't reflect the face-region tampering pattern seen in
+  # the hesitant-predictions review.
+  synth_tamper_prob: 0.0
+
+  # Pairwise soft-AUC term -- unchanged
+  auc_loss_weight: 0.1
+
+  # Recapture probe: the compass -- unchanged. Known saturated/circular (see CLAUDE.md);
+  # cross-check checkpoint selection against a full-scale scripts/analysis/probe_v2.py run
+  # and the public LB before trusting this alone, exactly as v0's postmortem recommends.
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  # Inference: TTA at three scales for the whole-document view, multiples of patch_size=14
+  # (same triplet as bayar_dinov2_v0) -- the face-crop view stays fixed at
+  # overlay.crop_size across all three scales (see predict_scores_tta).
+  tta: [476, 518, 560]
+
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
+
+  # --- Layer-wise LR decay fine-tuning -- unchanged from bayar_dinov2_v0 ---
+  # Applies to the dino sub-module only; overlay/gate/fusion get their own base-LR groups
+  # (see build_bayar_fusion_param_groups in src/freuid/models/bayar_fusion.py).
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+
+  # Fallback if full fine-tune doesn't fit batch_size=32: freeze all but the last k
+  # transformer blocks + head. null = full fine-tune (default for this run).
+  train_last_k_blocks: null
+
+  # torch gradient checkpointing on the dino sub-module -- only turn on if needed to fit
+  # batch_size=32 in memory.
+  grad_checkpointing: false
+
+  # AMP (autocast + GradScaler) -- unchanged from bayar_dinov2_v0.
+  amp: true
