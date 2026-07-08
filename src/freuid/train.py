@@ -121,7 +121,7 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
                                  regions_dir=_rdir, return_face_meta=rfm)
         val_ds = FreuidDataset(cfg.data_dir, "train", clean_tf, ids=val_ids,
                                regions_dir=_rdir, return_face_meta=rfm)
-    else:
+    elif cfg.extra.get("analog_double", True):
         # partial (not a local closure) so DataLoader workers can pickle it under 'spawn'
         # (macOS default); calling it with a seed -> recapture pipeline (None=random, int=fixed).
         make_analog = functools.partial(recapture_transforms, size, mean, std)
@@ -134,6 +134,14 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
             f"[train] analog_double: train {len(base_train.samples)}+{len(train_ds.analog_idx)}"
             f"={len(train_ds)} | val {len(base_val.samples)}+{len(val_ds.analog_idx)}={len(val_ds)}"
         )
+    else:
+        # analog_double=False: plain single-copy path (reproduces the pre-analog-double
+        # baseline like dinov2_v1) -- standard train aug + clean val, no recapture doubling.
+        # For A/B isolation of the analog-double augmentation.
+        train_tf = build_transforms(size, True, mean, std)
+        train_ds = FreuidDataset(cfg.data_dir, "train", train_tf, ids=train_ids)
+        val_ds = FreuidDataset(cfg.data_dir, "train", clean_tf, ids=val_ids)
+        print(f"[train] analog_double=OFF (plain): train {len(train_ds)} | val {len(val_ds)}")
 
     pin_memory = torch.cuda.is_available()  # unsupported/no-op on MPS, only helps CUDA
     train_loader = DataLoader(
