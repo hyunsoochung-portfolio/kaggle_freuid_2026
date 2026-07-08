@@ -1,0 +1,37 @@
+# configs/data_attention_sched.yaml
+# Next A/B. KEEP data_attention_match's new pipeline (analog-double train+val, AUC ranking
+# loss, multi-scale TTA) + already-matched backbone/lr/head_dropout, but switch the TRAINING
+# SCHEDULE to dinov2_v1's — LLRD 0.75 (was 0.7), warmup 1 (was 2) — and run 15 epochs.
+# Question: do the schedule diffs (not just backbone/lr/dropout) explain part of the
+# 0.0915-vs-0.0686 gap, with the new pipeline still on?
+# NOTE: dinov2_v1 also used torch.compile (speed only, no score effect — not wired on this
+# branch) and lr_min=1e-6 (this branch's cosine floor is 0; negligible). Both omitted.
+
+name: data_attention_sched
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 15
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+
+  llrd:
+    enabled: true
+    decay: 0.75          # dinov2_v1 (match used 0.7)
+    warmup_epochs: 1     # dinov2_v1 (match used 2)
+  amp: true
