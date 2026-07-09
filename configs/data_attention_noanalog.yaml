@@ -28,6 +28,8 @@ extra:
   auc_loss_weight: 0.1     # kept
   tta: [476, 518, 560]     # kept
   missing_id_score: 0.5
+  save_last: true          # also keep the ep12 (last) checkpoint -> submit that, not best-val
+                           # (clean val saturates to 0 at ep2, so best-val locks onto ep2)
   llrd:
     enabled: true
     decay: 0.7

@@ -351,6 +351,17 @@ def main() -> None:
             )
             print(f"  -> saved {ckpt} (val_AuDET={best_metric:.6f})")
 
+        # Optionally also keep the LATEST epoch's weights (overwritten each epoch). Useful when
+        # the val metric saturates and best-val locks onto an early/undertrained epoch -- then
+        # the last, more-trained checkpoint can generalise better to the harder hidden test.
+        if cfg.extra.get("save_last", False):
+            last_ckpt = Path("checkpoints") / f"{cfg.name}_last.pt"
+            torch.save(
+                {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
+                last_ckpt,
+            )
+            print(f"  -> saved {last_ckpt} (last, epoch={epoch})")
+
 
 if __name__ == "__main__":
     main()
