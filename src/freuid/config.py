@@ -16,7 +16,7 @@ class Config:
 
     # data
     data_dir: str = "data"
-    image_size: int = 384
+    image_size: int | None = None  # None → use the backbone's native input resolution
     val_fraction: float = 0.1
 
     # model
