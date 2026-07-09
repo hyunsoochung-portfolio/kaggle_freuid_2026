@@ -1,0 +1,36 @@
+# configs/data_attention_noanalog_30ep.yaml
+# The winning recipe (data_attention_noanalog ep12 = 0.03935) pushed to 30 epochs from scratch,
+# with early-stopping (stop if val_loss rises 3 epochs in a row) and save_last (submit the last
+# epoch, not the val-locked ep2). Tests whether more training beats ep12's 0.03935.
+# analog_double OFF, keep attn-pool + AUC + TTA.
+
+name: data_attention_noanalog_30ep
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 30                 # ceiling; early_stop_patience may stop sooner
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: false     # dropped (proven harmful)
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true          # submit the last epoch, not best-val (clean val saturates to 0)
+  early_stop_patience: 3   # stop if val_loss rises 3 epochs in a row (12ep run never did)
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true

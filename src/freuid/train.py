@@ -321,6 +321,11 @@ def main() -> None:
     Path("checkpoints").mkdir(exist_ok=True)
     best_metric = float("inf")
     best_tiebreak = float("inf")
+    # Early stopping: stop once val_loss rises for `early_stop_patience` epochs in a row
+    # (0 = disabled). Guards against overtraining when running to a large epochs ceiling.
+    es_patience = int(cfg.extra.get("early_stop_patience", 0))
+    prev_val_loss = float("inf")
+    val_rises = 0
     for epoch in range(1, cfg.epochs + 1):
         train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer,
                                    auc_weight, scaler=scaler)
@@ -361,6 +366,16 @@ def main() -> None:
                 last_ckpt,
             )
             print(f"  -> saved {last_ckpt} (last, epoch={epoch})")
+
+        # Early stop on consecutive val_loss rises (checked after saving, so the last
+        # checkpoint includes this epoch). val_loss is noisy here, so patience>=3 is advised.
+        if es_patience > 0:
+            val_rises = val_rises + 1 if val_loss > prev_val_loss else 0
+            prev_val_loss = val_loss
+            if val_rises >= es_patience:
+                print(f"[early-stop] val_loss rose {val_rises} epochs in a row "
+                      f"(patience={es_patience}) -> stopping at epoch {epoch}")
+                break
 
 
 if __name__ == "__main__":
