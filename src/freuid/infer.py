@@ -249,6 +249,16 @@ def main() -> None:
     if model_type == "consistency":
         from freuid.models import build_consistency_model
         model = build_consistency_model(cfg).to(device)
+    elif model_type == "joint":
+        # pretrained=False: 학습 가중치를 아래에서 덮어쓰므로 백본 다운로드 불필요.
+        from freuid.models.joint import JointConsistencyModel
+        model = JointConsistencyModel(
+            cfg.backbone, pretrained=False,
+            head_dropout=float(cfg.extra.get("head_dropout", 0.0)),
+            patch_layers=int(cfg.extra.get("patch_consistency_layers", 2)),
+            patch_heads=int(cfg.extra.get("patch_consistency_heads", 8)),
+            patch_dropout=float(cfg.extra.get("patch_consistency_dropout", 0.1)),
+        ).to(device)
     else:
         # pretrained=False: 어차피 아래에서 우리가 학습한 가중치를 덮어쓰므로 ImageNet 사전학습을
         # 내려받을 필요가 없다(추론 시작 속도 향상).

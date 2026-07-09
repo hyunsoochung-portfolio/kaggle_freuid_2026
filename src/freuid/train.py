@@ -257,6 +257,10 @@ def main() -> None:
     if model_type == "consistency":
         from freuid.models import build_consistency_model
         model = build_consistency_model(cfg).to(device)
+    elif model_type == "joint":
+        # full-FT attention-pool backbone + parallel patch-consistency branch, fused.
+        from freuid.models import build_joint_model
+        model = build_joint_model(cfg).to(device)
     else:
         model = build_model(
             cfg.backbone, cfg.pretrained,
@@ -299,9 +303,15 @@ def main() -> None:
     else:
         trainable = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
-        # Cosine decay over the run: anneals LR toward 0 by the final epoch. Helps the
-        # pretrained RGB backbone settle rather than oscillating at a flat LR.
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
+        # Optional linear warmup (extra.warmup_epochs) then cosine decay; else plain cosine.
+        # Warmup stabilises full fine-tuning when LLRD is off (e.g. the joint model). Cosine
+        # anneals LR toward 0 by the final epoch so the backbone settles.
+        warmup_e = int(cfg.extra.get("warmup_epochs", 0))
+        if warmup_e > 0:
+            from freuid.optim import build_warmup_cosine_scheduler
+            scheduler = build_warmup_cosine_scheduler(optimizer, cfg.epochs, warmup_epochs=warmup_e)
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
 
     auc_weight = float(cfg.extra.get("auc_loss_weight", 0.0))
     if auc_weight > 0.0:
