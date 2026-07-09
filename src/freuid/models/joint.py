@@ -98,7 +98,9 @@ class JointConsistencyModel(nn.Module):
         self.num_prefix = int(getattr(self.net, "num_prefix_tokens", 1))
 
         if consist_type == "conv":
-            self.consist: nn.Module = ConvConsistencyHead(dim, hidden=conv_hidden, dropout=conv_dropout)
+            self.consist: nn.Module = ConvConsistencyHead(
+                dim, hidden=conv_hidden, dropout=conv_dropout
+            )
         elif consist_type == "patch":
             self.consist = _PatchConsist(dim, patch_layers, patch_heads, patch_dropout)
         else:
