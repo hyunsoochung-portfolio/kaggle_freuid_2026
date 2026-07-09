@@ -1,0 +1,35 @@
+# configs/data_attention_noanalog.yaml
+# The data-attention pipeline with analog-double DROPPED (it hurt: dinov2_analog 0.115 vs
+# dinov2_v1 0.0686). Keeps everything else that data-attention added on top of the dinov2_v1
+# recipe: attention-pool head, AUC ranking loss, multi-scale TTA. Same as data_attention_match
+# EXCEPT extra.analog_double=false. Question: does the rest (AUC+TTA) beat dinov2_v1 (0.0686)
+# once the harmful analog-double is removed?
+
+name: data_attention_noanalog
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 12
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: false     # DROPPED (proven harmful)
+  auc_loss_weight: 0.1     # kept
+  tta: [476, 518, 560]     # kept
+  missing_id_score: 0.5
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true
