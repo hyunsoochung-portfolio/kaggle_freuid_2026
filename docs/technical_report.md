@@ -1,7 +1,7 @@
 # FREUID Challenge 2026 — Technical Report
 
-From the DINOv2 baseline (`finetune_v0`) through the current fusion-model attempt
-(`bayar_dinov2_v1`). Covers what was tried, why, what happened, and what's still open.
+From the DINOv2 baseline (`finetune_v0`) through the current photo-substitution data-augmentation
+attempt (`photosub_v0`). Covers what was tried, why, what happened, and what's still open.
 
 ## Problem recap
 
@@ -276,32 +276,185 @@ daily submission cap, which teammates' parallel experiments (EVA-01, SigLIP2, Co
 several "data_attention" variants — none of which appear elsewhere in this repo's history, so
 apparently tracked outside it) had already exhausted for the day.
 
+## photosub_v0: photo-substitution training augmentation
+
+**Motivation**: manual review of `finetune_v0`'s lowest-ranked-yet-genuinely-fraudulent public-
+test predictions (`scripts/analysis/deep_miss_dossiers.py`) found a coherent taxonomy of 9
+"deep miss" ids (confirmed fraud, scored as if bona-fide) plus 59 further "boundary" ids at a
+~74% fraud rate: **MODE_A** (within-frame physical paste — style-mismatched print, paper rim,
+shadow), **MODE_B** (full-cover physical paste, overhangs the frame), **MODE_C** (frame-aligned
+digital swap, zero local statistical anomaly, only cross-region semantic evidence), and
+**MODE_D** (ghost/secondary-portrait mismatch, only for the 2 of 5 templates that carry one).
+Training data is ~99.97% digital and never modeled this evidence family at all — the hypothesis
+was that `finetune_v0` misses these not because they're hard, but because it was never shown
+anything resembling them.
+
+**What changed vs. `finetune_v0`** (`configs/photosub_v0.yaml`, confirmed via
+`scripts/config_diff.py` to differ in exactly one block, `extra.photosub.*` — backbone, LLRD,
+AMP, recapture augmentation, AUC loss, TTA all byte-identical to the baseline):
+
+- **Offline photo-substitution generators** (`src/freuid/photosub/generators.py`): deterministic
+  functions of `(image, frame/ghost box, donor crop, rng)` implementing MODE_A/B/C/D. MODE_C/D
+  are color- *and* degradation-matched (`degradation_match.py` — blur/moiré/JPEG-grain search
+  against the target region's own local stats) so they aren't locally distinguishable by cheap
+  forensic stats, only by cross-region semantics. MODE_D ships with a **darkened-ghost-variant**
+  slice (`ghost_darken_prob=0.3`, factor range 0.15–0.45) to reproduce the real illegible-ghost
+  case (id `40dd1055fd`'s ghost is unreadably dark even at 4x zoom) rather than only ever
+  generating crisp ghosts.
+- **Donor discipline**: donors are bona-fide TRAIN faces only, excluded from any id
+  suspiciously close (ArcFace cosine similarity) to a frozen diagnostic probe id, ~40% sampled
+  as "hard" (softmax-weighted toward the target's own most-similar match) vs. broad/random.
+- **Twin-pair batching** (`src/freuid/photosub/mixing.py`): each generated row's `source_id`
+  (the bona-fide TRAIN image it was derived from) is recorded; `TwinPairBatchSampler` tries,
+  with probability `twin_pair_prob=0.5`, to pull that same source into the batch alongside its
+  tampered derivative, so the pair differs *only* in the substitution evidence.
+- **Pair-hinge loss** (`freuid.loss.pair_hinge_loss`, weight `0.5`, margin `1.0`): for every
+  twin pair landed together in a batch, penalizes `relu(margin - (tampered_logit -
+  clean_logit))` directly — on top of the unchanged BCE + pairwise-soft-AUC terms.
+- **Mode-weighted, split-disciplined mixing**: photosub rows are added at `share=0.15` of total
+  positives, drawn per confirmed-prevalence mode weights (A=0.44, B=0.33, C=0.22 from the 9
+  deep-miss ids' A=4/9, B=3/9, C=2/9; D=0.15 is a modest, *hypothesis-driven* weight, not backed
+  by confirmed prevalence — 0/9, but only 2 of 5 templates carry a ghost at all, so n=9 saying
+  nothing about it isn't evidence against it). `select_mixed_rows` filters generated rows to
+  `source_id ∈ train_ids` for whichever split a given run actually uses, so a row never leaks
+  validation-set appearance into training.
+- **Per-epoch probe hooks** (`src/freuid/photosub/probes.py`): the 9 deep-miss ids scored
+  individually every epoch (logit + rank percentile vs. that epoch's val distribution), plus
+  aggregate mean-logit tracking for the 59 boundary ids, 295 clean-floor ids (regression guard:
+  must not rise), and a newly-added 200-id ceiling-retention probe (`data/probes/
+  ceiling_frauds_sample_ids.csv`, sampled from `logit_census_raw.csv`'s saturated-ceiling block —
+  a self-consistency check, since public_test has no ground truth: the fix must not trade away
+  `finetune_v0`'s existing high-confidence detections).
+
+**Mass generation** (`scripts/generate_photosub_dataset.py`, full un-restricted bona-fide TRAIN
+pool, 9,000 sources, seed 42): **9,000/9,000 rows written, 0 skipped.** Mode counts: A=3,845,
+B=2,834, C=1,867, D_main=229, D_ghost=225. A random-sample spot review over the actual generated
+corpus (not the curated demo sheets — `scripts/analysis/photosub_spot_review.py`, 80 rows +
+full-corpus stats) found: 0/9,000 tiny/degenerate tamper regions, 0/9,000 unexpected template
+types, and — the donor-pool-exhaustion concern raised before generating — **not a real problem**:
+3,454 distinct donors used across 9,000 rows, the most-reused donor appearing only 9 times
+(0.10%), 918/3,454 used exactly once. Darkened-ghost variants were manually verified across the
+intended severity spectrum, from fully legible down to a near-illegible worst case (factor
+0.157) closely matching the real `40dd1055fd` reference. One infrastructure issue surfaced and
+was fixed during this run: the generator originally only flushed its output CSV once, at the
+very end of the loop; a mid-run stall (cause unclear — resolved itself on retry, possibly
+transient host contention) killed the process and orphaned ~2,800 already-written image/mask
+files with no CSV rows to recover them. Fixed to flush incrementally every 50 rows before
+re-running the full generation.
+
+One shortfall: **MODE_D fell short of its target weight.** The full (un-restricted) training
+run's `share=0.15` target wanted 608 D rows; only 402 were eligible after filtering to that run's
+actual `train_ids` (454 were generated in total, but ~52 fell on the val side of the split).
+`select_mixed_rows` took all 402 available and printed a warning rather than failing — not
+fatal, but D is under-represented relative to its intended (already modest) weight.
+
+**Training** (VESSL A100, 20 epochs, full real split — `train=66,872`, `val=6,935`, no
+`--limit`, ~13.3–13.75 min/epoch, ~4.5h total): sanity passed (`init BCE≈ln2`), losses finite
+throughout, twin pairs landed every epoch (~1,499/epoch, consistent with `twin_pair_prob=0.5`
+over ~4,455 mixed-in rows). The standard val/probe metrics **saturated far faster than
+`finetune_v0`'s own 20-epoch run** — `val_loss` 0.517→0.004 and `AuDET`→0.0000 by **epoch 2**,
+vs. `finetune_v0` needing the full run to reach its final `probe_AuDET=0.000002`. Best
+checkpoint (by `probe_audet`) saved at **epoch 6** (`0.000031`); no later epoch ever beat it, so
+the checkpoint actually used for inference/submission is the epoch-6 snapshot, not the final
+epoch-20 weights. Floor/ceiling guards held for the whole run: `clean_floor_mean_logit` only
+ever dropped (never rose, -0.40 → -8.38), `ceiling_mean_logit` re-saturated and kept climbing
+(0.58 → 15.09 by epoch 20) — the fix did not trade away `finetune_v0`'s existing high-confidence
+detections.
+
+**Deep-9 diagnostic — the core, and mixed, result.** Raw logit per id (mode in parens; C-tent. =
+the one id assigned MODE_C tentatively, by elimination, not positive ghost confirmation):
+
+| id | mode | epoch 1 | epoch 6 (checkpoint) | epoch 20 (final) |
+|---|---|---|---|---|
+| `c6651aee` | A | -0.11 | -5.53 | -7.79 |
+| `b5eebda1` | A | -0.14 | 0.23 | 3.53 |
+| `40dd1055` | A | 0.39 | 0.54 | -8.06 |
+| `5542f45f` | A | 0.36 | 10.25 | 0.48 |
+| `7b409d3b` | B | -0.29 | 9.39 | 12.55 |
+| `cd7ad569` | B | -0.30 | 10.25 | 12.21 |
+| `2d4ad17d` | B | 0.33 | 10.31 | 15.72 |
+| `cceb6a4f` | C (tent.) | -0.37 | 12.39 | 15.43 |
+| `a2a3fe5b` | C (conf.) | 0.86 | 12.00 | 15.20 |
+
+Every MODE_B and MODE_C id (**including the tentative one**, which was predicted to be the
+likely straggler) converged fast and stayed stably, strongly positive. **MODE_A did the
+opposite of the hypothesis**: the mode with the most visually blatant evidence (rims, tears,
+tape, style mismatch) ended up the weakest — by epoch 20, 2 of 4 MODE_A ids (`c6651aee`,
+`40dd1055`) were stably, strongly negative (confidently scored *bona-fide*, worse than
+`finetune_v0`'s own baseline), one (`b5eebda1`) only mildly positive, and one (`5542f45f`) had
+round-tripped from a strong positive at epoch 6 back down near zero. Even at the actually-used
+epoch-6 checkpoint — healthier than epoch 20, but still not matching the predicted shape — MODE_A
+sits at 0.23–10.25 against MODE_B/C's 9.39–12.39. Individual ids oscillated substantially epoch
+to epoch before this pattern stabilized (~epoch 9–11 onward), consistent with a model whose
+overall loss barely moves once it saturates the easy synthetic distribution but whose weights
+keep drifting in ways that swing these specific real, hard examples around.
+
+**Analysis — most-to-least confident**:
+1. **Shape-realism gap, previously documented and now corroborated in practice.**
+   `generators.py`'s own docstring already flagged this: MODE_A/B paste a (possibly
+   small-angle-rotated) **rectangle**, not the fully irregular, hand-cut/arch-shaped silhouette
+   several real deep-miss ids actually show (`deep_miss_dossiers.py`'s `CHECKLIST_RESULTS` — e.g.
+   `b5eebda1`'s arch-shaped cutout overlapping the crest logo, `40dd1055`'s irregular silhouette
+   bulging past the hairline). If the model learned "fraud paste = rectangular color/style-
+   mismatched inset + rim + drop shadow," a real *irregular*-boundary paste never triggers that
+   rule — and could plausibly read as *more* clean by contrast (no rectangular anomaly to flag),
+   a concrete mechanism for the negative reversal, not just a failure to help.
+2. **MODE_C/D's signal is narrower and more consistent than MODE_A/B's.** C/D always exactly
+   fill the frame/ghost box with a color-and-degradation-matched patch — one tight, repeatable
+   recipe. A/B randomize style, rim width, rotation, offset, shadow edges/blur/strength, and an
+   optional curl highlight per example — much more heterogeneous. At only 15% of positives split
+   four ways, A/B's wider variety may simply be harder to consolidate into one stable,
+   generalizable rule than C/D's narrow one, independent of the shape-realism gap above.
+3. **Twin-pair supervision never touches these 9 ids directly.** The pair-hinge term only
+   applies to synthetic (tampered, own bona-fide source) pairs; none of the 9 real deep-miss ids
+   have a synthetic twin. Their behavior is entirely mediated by generalization from whatever
+   feature the backbone converged on for "photo substitution" — which this data suggests ended
+   up much closer to C/D's clean-swap signature than A/B's physical-paste one.
+4. **Not a volume problem.** MODE_A got the *largest* photosub allocation (1,801 rows, weight
+   0.4444) and still underperformed B/C — arguing against "just needed more A-mode rows" as the
+   primary explanation, in favor of the qualitative mismatch in point 1.
+5. **This is a failed gate on its own pre-registered terms.** `configs/photosub_v0.yaml`'s
+   docstring pre-registered "majority of the 9 ids' rank percentiles rise... into the ceiling
+   region, with no id collapsing further." 5 of 9 (B/C) did rise into the ceiling; MODE_A — the
+   modality expected to lead — is the one that collapsed further for 2 of its 4 ids.
+
+**Submission status**: inference run (3-scale TTA `[476, 518, 560]`, rank-averaged) completed
+cleanly — 142,818 rows, 0 exact-zero scores, min 0.000981/max 0.996630. Kaggle submission
+attempted and rejected (`400 Bad Request`) — file and message both well-formed; almost certainly
+the team's shared daily submission cap, already exhausted by teammates' parallel runs earlier
+the same day (5 same-day submissions visible in the competition's own history). Checkpoint
+(346MB) and submission CSV pulled to the local repo pending a retry after the daily reset
+(00:00 UTC). **No public LB number yet** — everything above is inferred from the deep-9 probe
+and the standard val/probe/floor/ceiling instruments, not the real held-out test distribution.
+
 ## Open questions and recommended next steps
 
-1. **Get the actual public LB number.** Everything above about `bayar_dinov2_v1` is inferred
-   from `probe_v2`, which is a better instrument than the saturated recapture probe but still
-   evaluates a held-out split of the *training* distribution — not real out-of-domain document
-   types, GenAI edits, or physically-recaptured photos. It's a harder degradation, not a harder
-   source distribution. This is the cheapest, highest-information next step and should happen
-   before further architecture changes.
-2. **Disentangle the bundled `v1` changes.** A clean ablation restoring `synth_tamper_prob:
-   0.3` (isolating just the face-crop pipeline fix) would resolve whether the APCER regression
-   traces to the synth-tamper removal or the pipeline fix itself.
-3. **The most-confident root cause from the `v0` postmortem is still unaddressed.** The
-   `overlay_gate` check above suggests the capacity/overfitting concern is still live. If
-   pursued further, the next fix should target that directly — stronger regularization on the
-   overlay branch (higher `fusion_dropout`, weight decay on overlay params, or shrinking
-   `noise_feat_dim`/the RGB backbone) — rather than more data-pipeline correctness work.
-4. **A structural concern worth weighing before investing further**: `BayarConv2d` is
-   fundamentally a digital-noise-residual signal, the same category of signal this project's
-   founding failure (the pre-project forensic-noise model) leaned on and lost on real,
-   reprinted images. Fixing face-crop reliability doesn't resolve whether that signal *type*
-   survives the analog hole at all — it only ensures the branch learns a more coherent version
-   of it from clean training data. Continued investment here should be weighed against the
-   other priorities already identified as structurally safer: multi-seed rank-averaging of
-   `finetune_v0`'s own recipe (cheapest diversity, no new architecture), a `ViT-L` scale-up
-   (feasibility already confirmed on the A100), and shaping the loss toward the partial-AUC
-   `APCER@1%BPCER` tail specifically rather than the full curve.
+**Historical note**: the `bayar_dinov2_v1` priorities that used to live in this section
+(getting probe_v2 at scale, disentangling its bundled changes, the overlay-branch capacity
+concern, BayarConv2d's structural noise-residual risk) were never resolved — the project moved
+to the photo-substitution line of work above instead of pursuing them. They're restated as item
+5 below, not dropped.
+
+**Current priorities, post-`photosub_v0`:**
+
+1. **Get the actual public LB number once the daily submission cap resets.** Everything about
+   `photosub_v0` above is inferred from local instruments; the real test distribution (print-
+   and-capture, GenAI edits, unseen document types) is the only thing that actually matters and
+   hasn't weighed in yet.
+2. **Fix the shape-realism gap before iterating on weights or loss terms further.** Add an
+   irregular/hand-cut silhouette variant to MODE_A/B (not just a rotated rectangle) — this is
+   the most concrete, already-diagnosed candidate for why MODE_A underperformed B/C so
+   specifically, per the analysis above. Re-render the curated demo sheets for human review
+   before regenerating the mass corpus, per the same gate this experiment already used once.
+3. **Run the pre-registered ablations** (`configs/photosub_v0_noablate_nopairs.yaml`,
+   `configs/photosub_v0_noablate_nohinge.yaml` — drafted, not yet run) to attribute how much of
+   the B/C gain (or the A regression) traces to the photosub data itself vs. twin-pairing vs.
+   the hinge term specifically.
+4. **Top up MODE_D** (402/608 of its already-modest target) if the ghost-mismatch signal is
+   worth pursuing further — a small, targeted supplemental generation run restricted to
+   ghost-bearing template types would close this without a full mass-regeneration pass.
+5. **The `bayar_dinov2_v1` questions above remain genuinely unanswered**, not resolved — if this
+   photo-substitution line of work stalls, they're still there to come back to.
 
 ## Appendix: this session's commits (`exp/dinov2+@`)
 
