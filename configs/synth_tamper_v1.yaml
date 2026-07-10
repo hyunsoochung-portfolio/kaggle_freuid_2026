@@ -2,9 +2,10 @@
 # The 0.039 winner (data_attention_noanalog) with ONE change: synthetic-fraud
 # augmentation on train + a synth PROBE for val/checkpoint selection.
 #
-# Everything about the MODEL and TRAINING recipe is byte-for-byte the 0.039
-# config (backbone, image_size, epochs, lr, wd, attn-pool, AUC loss, TTA, LLRD,
-# AMP). Added:
+# The MODEL recipe matches the 0.039 config (backbone, image_size, lr, wd,
+# attn-pool, AUC loss, TTA, LLRD, AMP). Differences: epochs raised 12 -> 25 with
+# early stopping (the synth probe is a real compass now, so let it train until it
+# plateaus), and:
 #   - extra.synth_tamper: turn a fraction of bona-fide into synthetic fraud each
 #     epoch (face-swap / colour-on-gray[BENIN] / field-carve -- all data-grounded).
 #   - the val loader becomes a deterministic synth probe (clean bona 0 + tampered
@@ -20,7 +21,7 @@ backbone: vit_base_patch14_dinov2.lvd142m
 pretrained: true
 image_size: 518
 
-epochs: 12
+epochs: 25
 batch_size: 32
 lr: 5.0e-5
 weight_decay: 5.0e-2
