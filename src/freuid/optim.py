@@ -62,29 +62,39 @@ def build_llrd_param_groups(
     Only trainable (``requires_grad=True``) params are included, so this composes with
     ``freeze_all_but_last_k_blocks`` -- frozen params are simply absent from the optimizer.
     """
-    if not hasattr(model, "blocks"):
+    # The ViT backbone is either the model itself (baseline path) or wrapped as ``model.net``
+    # (JointConsistencyModel). Locate it and the prefix its params carry in named_parameters,
+    # so the exact same LLRD schedule applies -- the joint model must train identically to the
+    # baseline aside from the extra consistency head (which lands in the base-LR group).
+    if hasattr(model, "blocks"):
+        backbone, prefix = model, ""
+    elif hasattr(model, "net") and hasattr(model.net, "blocks"):
+        backbone, prefix = model.net, "net."
+    else:
         raise AttributeError(
-            f"{type(model).__name__} has no .blocks attribute -- LLRD only "
+            f"{type(model).__name__} has no .blocks (or .net.blocks) -- LLRD only "
             "supports timm ViT-style models"
         )
-    n_blocks = len(model.blocks)
+    n_blocks = len(backbone.blocks)
     no_decay_names: set[str] = set()
-    if hasattr(model, "no_weight_decay"):
-        no_decay_names = set(model.no_weight_decay())
+    if hasattr(backbone, "no_weight_decay"):
+        no_decay_names = set(backbone.no_weight_decay())
 
     def depth_of(name: str) -> int:
-        if name.startswith("blocks."):
-            block_idx = int(name.split(".")[1])
+        n = name[len(prefix):] if name.startswith(prefix) else name
+        if n.startswith("blocks."):
+            block_idx = int(n.split(".")[1])
             return n_blocks - block_idx
-        if name.startswith("patch_embed.") or name.split(".")[0] in (
+        if n.startswith("patch_embed.") or n.split(".")[0] in (
             "pos_embed", "cls_token", "reg_token", "dist_token",
         ):
             return n_blocks + 1
-        return 0  # head, norm, fc_norm, attn_pool, or anything else -> base LR
+        return 0  # head, norm, fc_norm, attn_pool, consistency head, etc. -> base LR
 
     def is_no_decay(name: str, param: torch.Tensor) -> bool:
-        top = name.split(".")[0]
-        return param.ndim <= 1 or name.endswith(".bias") or top in no_decay_names
+        n = name[len(prefix):] if name.startswith(prefix) else name
+        top = n.split(".")[0]
+        return param.ndim <= 1 or n.endswith(".bias") or top in no_decay_names
 
     buckets: dict[tuple[int, bool], list[torch.Tensor]] = {}
     for name, param in model.named_parameters():
