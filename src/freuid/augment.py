@@ -399,11 +399,16 @@ def synth_tamper(img, donor, rng, nrng, text_prob=0.2, allow_color_on_gray=False
     return (res[0], "field_carve") if res else (img, "none")
 
 
-def build_donor_pool(data_dir, seed: int = 42, per_type: int = 48) -> dict[str, list[Path]]:
-    """type -> list of bona-fide image paths, used as face-swap donors."""
+def build_donor_pool(data_dir, seed: int = 42, per_type: int = 48,
+                     exclude_ids: set[str] | None = None) -> dict[str, list[Path]]:
+    """type -> list of bona-fide image paths, used as face-swap donors. Pass
+    ``exclude_ids`` (the val ids) so no validation image ever leaks into training
+    or the probe as a donor face."""
     from freuid.data import load_labels
     df = load_labels(data_dir, "train")
     df = df[df["label"] == 0]
+    if exclude_ids:
+        df = df[~df["id"].isin(exclude_ids)]
     rng = np.random.default_rng(seed)
     pool: dict[str, list[Path]] = {}
     for t, g in df.groupby("type"):

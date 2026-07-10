@@ -134,7 +134,8 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
         st = cfg.extra["synth_tamper"]
         train_tf = build_transforms(size, True, mean, std)   # same aug as the plain 0.039 path
         donor_pool = build_donor_pool(
-            cfg.data_dir, seed=cfg.seed, per_type=int(st.get("donor_per_type", 48)))
+            cfg.data_dir, seed=cfg.seed, per_type=int(st.get("donor_per_type", 48)),
+            exclude_ids=val_ids)   # keep val images out of the donor pool (no leakage)
         base_train = FreuidDataset(cfg.data_dir, "train", None, ids=train_ids)
         train_ds = SynthTamperWrapper(
             base_train, train_tf, donor_pool,
