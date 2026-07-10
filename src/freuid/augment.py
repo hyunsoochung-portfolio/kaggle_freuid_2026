@@ -6,7 +6,11 @@ No horizontal flip anywhere — document text and orientation must be preserved.
 
 from __future__ import annotations
 
+import random
+from pathlib import Path
+
 import albumentations as A
+import cv2
 import numpy as np
 from albumentations.pytorch import ToTensorV2
 from PIL import Image, ImageFilter
@@ -196,3 +200,313 @@ class AnalogDoubleDataset(Dataset):
         src = sample.card_path if sample.card_path is not None else sample.path
         img = Image.open(src).convert("RGB")
         return tf(img), sample.label
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-fraud augmentation (data-grounded)
+# ---------------------------------------------------------------------------
+# Manufactures a fraud (label 1) from a bona-fide (label 0) by reproducing a
+# tell observed in the real fraud data (see scripts/synth_tamper.py and the
+# 100-image fraud-pattern analysis):
+#   face_clean_paste    -- sharp portrait paste, hard seam, security overlay
+#                          broken; on Mauritius this leaves the ghost portrait =
+#                          the original person (main != ghost). All doc types.
+#   face_color_on_gray  -- a colour face grafted onto a grayscale body (BENIN
+#                          only: BENIN genuine photos are black-and-white).
+#   field_carve         -- a value field scratched/rewritten: rough wood-grain
+#                          + dark smudge + degraded digits + box boundary.
+# Scalar choices come from a python ``rng`` (random.Random); array noise from an
+# ``nrng`` (np.random.Generator). Seeding both makes the val probe deterministic;
+# leaving them fresh gives per-epoch variety for training.
+
+_FACE_CASCADE = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
+
+def _detect_face(img):
+    """Largest frontal face (x, y, w, h) in a BGR image, or None."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = _FACE_CASCADE.detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
+    if len(faces) == 0:
+        return None
+    return sorted(faces, key=lambda b: b[2] * b[3], reverse=True)[0]
+
+
+def _photo_box(face, W, H):
+    x, y, w, h = face
+    return (max(0, int(x - 0.5 * w)), max(0, int(y - 0.7 * h)),
+            min(W, int(x + w + 0.5 * w)), min(H, int(y + h + 1.15 * h)))
+
+
+def _face_box(face, W, H, fx=0.18, fy=0.22):
+    x, y, w, h = face
+    ex, ey = int(w * fx), int(h * fy)
+    return (max(0, x - ex), max(0, y - ey), min(W, x + w + ex), min(H, y + h + ey))
+
+
+def _to_gray3(bgr):
+    return cv2.cvtColor(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+
+
+def _clarify(photo, rng):
+    """Boost contrast + saturation + sharpness so a paste STANDS OUT (the real
+    tell: fraud photos look 'too clean / on top', genuine ones are overlay-tinted)."""
+    f = photo.astype(np.float32)
+    m = f.mean()
+    f = np.clip((f - m) * rng.uniform(1.15, 1.30) + m + rng.uniform(-3, 8), 0, 255)
+    hsv = cv2.cvtColor(f.astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[..., 1] = np.clip(hsv[..., 1] * rng.uniform(1.15, 1.40), 0, 255)
+    f = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+    blur = cv2.GaussianBlur(f, (0, 0), 1.2)
+    return np.clip(f + rng.uniform(0.6, 1.0) * (f - blur), 0, 255).astype(np.uint8)
+
+
+def _face_clean_paste(target, donor, rng):
+    ft, fd = _detect_face(target), _detect_face(donor)
+    if ft is None or fd is None:
+        return None
+    Ht, Wt = target.shape[:2]
+    Hd, Wd = donor.shape[:2]
+    X0, Y0, X1, Y1 = _photo_box(ft, Wt, Ht)
+    dx0, dy0, dx1, dy1 = _photo_box(fd, Wd, Hd)
+    if X1 - X0 < 8 or Y1 - Y0 < 8 or dx1 - dx0 < 8 or dy1 - dy0 < 8:
+        return None
+    paste = cv2.resize(donor[dy0:dy1, dx0:dx1], (X1 - X0, Y1 - Y0))
+    out = target.copy()
+    out[Y0:Y1, X0:X1] = _clarify(paste, rng)      # hard rectangular seam
+    return out, (X0, Y0, X1, Y1)
+
+
+def _face_color_on_gray(target, donor, rng):
+    ft, fd = _detect_face(target), _detect_face(donor)
+    if ft is None or fd is None:
+        return None
+    Ht, Wt = target.shape[:2]
+    Hd, Wd = donor.shape[:2]
+    X0, Y0, X1, Y1 = _photo_box(ft, Wt, Ht)
+    rw, rh = X1 - X0, Y1 - Y0
+    if rw < 8 or rh < 8:
+        return None
+    body = _to_gray3(target[Y0:Y1, X0:X1])        # grayscale body
+    fx0, fy0, fx1, fy1 = _face_box(ft, Wt, Ht)
+    tx0, ty0 = max(0, fx0 - X0), max(0, fy0 - Y0)
+    tx1, ty1 = min(rw, fx1 - X0), min(rh, fy1 - Y0)
+    tw, th = tx1 - tx0, ty1 - ty0
+    if tw < 4 or th < 4:
+        return None
+    dx0, dy0, dx1, dy1 = _face_box(fd, Wd, Hd)
+    if dx1 - dx0 < 4 or dy1 - dy0 < 4:
+        return None
+    cface = _clarify(cv2.resize(donor[dy0:dy1, dx0:dx1], (tw, th)), rng)
+    mask = np.zeros((th, tw), np.float32)
+    cv2.ellipse(mask, (tw // 2, th // 2),
+                (int(tw * 0.46), int(th * 0.5)), 0, 0, 360, 1, -1)
+    mask = cv2.GaussianBlur(mask, (0, 0), max(1.0, tw * 0.03))[..., None]
+    body[ty0:ty1, tx0:tx1] = (
+        cface * mask + body[ty0:ty1, tx0:tx1] * (1 - mask)).astype(np.uint8)
+    out = target.copy()
+    out[Y0:Y1, X0:X1] = body
+    return out, (X0, Y0, X1, Y1)
+
+
+def _find_text_region(img):
+    """Most edge-dense field-sized box in the value zone (skip title / barcode)."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    H, W = edges.shape
+    bw, bh = int(W * 0.22), int(H * 0.075)
+    if bw < 8 or bh < 6:
+        return None
+    best, best_s = None, -1
+    for yy in range(int(H * 0.22), max(int(H * 0.22) + 1, int(H * 0.58)), max(1, bh // 2)):
+        for xx in range(int(W * 0.42), max(int(W * 0.42) + 1, W - bw), max(1, bw // 3)):
+            s = int(edges[yy:yy + bh, xx:xx + bw].sum())
+            if s > best_s:
+                best_s, best = s, (xx, yy, bw, bh)
+    return best
+
+
+def _digit_mask(roi):
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    thr = gray.mean() - 0.5 * gray.std()
+    d = cv2.dilate((gray < thr).astype(np.uint8), np.ones((2, 2), np.uint8))
+    return cv2.GaussianBlur(d.astype(np.float32), (0, 0), 0.6)[..., None]
+
+
+def _carve_grain(roi, rng, nrng):
+    """Strong scratched/rewritten field texture: coarse horizontal wood-grain
+    streaks + a dark rubbed smudge band + heavy grain, digits degraded (blurred,
+    noisy, partly faded). Calibrated to the real Egypt/Mozambique examples."""
+    h, w = roi.shape[:2]
+    f = roi.astype(np.float32)
+    _, yy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    streak = nrng.standard_normal((h, w)).astype(np.float32)
+    streak = cv2.GaussianBlur(streak, (0, 0), sigmaX=w * 0.06, sigmaY=0.5)
+    streak /= (np.abs(streak).max() + 1e-6)
+    f += streak[..., None] * rng.uniform(26, 40)
+    bc = h * rng.uniform(0.42, 0.68)
+    band = np.exp(-(((yy - bc) / (h * 0.24)) ** 2))
+    f -= (band * rng.uniform(16, 30))[..., None]
+    f += nrng.standard_normal((h, w, 1)).astype(np.float32) * rng.uniform(8, 13)
+    f = cv2.GaussianBlur(f, (0, 0), 0.6)
+    f = f * rng.uniform(0.98, 1.02) + np.array([4., 2., 0.])
+    d3 = _digit_mask(roi)
+    digit_soft = cv2.GaussianBlur(roi, (0, 0), rng.uniform(1.0, 1.6)).astype(np.float32)
+    digit_soft += nrng.standard_normal((h, w, 1)).astype(np.float32) * rng.uniform(4, 7)
+    fade = rng.uniform(0.18, 0.38)
+    digit_soft = digit_soft * (1 - fade) + float(f.mean()) * fade
+    patch = np.clip(digit_soft * d3 + f * (1 - d3), 0, 255)
+    for _ in range(rng.randint(2, 4)):
+        p0 = (int(w * rng.uniform(0, 0.6)), int(h * rng.uniform(0.15, 0.85)))
+        p1 = (p0[0] + int(w * rng.uniform(0.25, 0.55)),
+              p0[1] + int(h * rng.uniform(-0.4, 0.4)))
+        s = np.zeros((h, w), np.float32)
+        cv2.line(s, p0, p1, 1.0, thickness=rng.randint(1, 2))
+        s = cv2.GaussianBlur(s, (0, 0), 0.7)[..., None]
+        patch = np.clip(patch + s * rng.uniform(-26, 16), 0, 255)
+    return patch.astype(np.uint8)
+
+
+def _field_carve(img, rng, nrng, box=None):
+    reg = box if box is not None else _find_text_region(img)
+    if reg is None:
+        return None
+    x, y, w, h = reg
+    if w < 8 or h < 6:
+        return None
+    patch = _carve_grain(img[y:y + h, x:x + w], rng, nrng)
+    edge = int(rng.uniform(170, 195))
+    cv2.rectangle(patch, (0, 0), (w - 1, h - 1), (edge, edge, edge), 2)
+    out = img.copy()
+    out[y:y + h, x:x + w] = patch
+    return out, (x, y, x + w, y + h)
+
+
+def synth_tamper(img, donor, rng, nrng, text_prob=0.2, allow_color_on_gray=False):
+    """Bona-fide (BGR) -> synthetic fraud (BGR). Returns (out_bgr, mode); mode is
+    'none' if nothing could be applied (caller keeps the original label 0)."""
+    if rng.random() < text_prob:
+        res = _field_carve(img, rng, nrng)
+        return (res[0], "field_carve") if res else (img, "none")
+    if allow_color_on_gray and rng.random() < 0.25:
+        res = _face_color_on_gray(img, donor, rng)
+        if res:
+            return res[0], "face_color_on_gray"
+    res = _face_clean_paste(img, donor, rng)
+    if res:
+        return res[0], "face_clean_paste"
+    res = _field_carve(img, rng, nrng)                 # no detectable face -> text
+    return (res[0], "field_carve") if res else (img, "none")
+
+
+def build_donor_pool(data_dir, seed: int = 42, per_type: int = 48) -> dict[str, list[Path]]:
+    """type -> list of bona-fide image paths, used as face-swap donors."""
+    from freuid.data import load_labels
+    df = load_labels(data_dir, "train")
+    df = df[df["label"] == 0]
+    rng = np.random.default_rng(seed)
+    pool: dict[str, list[Path]] = {}
+    for t, g in df.groupby("type"):
+        rows = g.sample(n=min(per_type, len(g)), random_state=int(rng.integers(1 << 30)))
+        pool[str(t)] = [Path(p) for p in rows["path"].tolist()]
+    return pool
+
+
+class _DonorMixin:
+    """Lazily decode + cache donor BGR images from a per-type path pool."""
+
+    donor_pool: dict[str, list[Path]]
+    _donor_cache: dict
+
+    def _donor_bgr(self, dtype, rng):
+        paths = self.donor_pool.get(dtype)
+        if not paths:  # unknown type -> any donor
+            paths = [p for ps in self.donor_pool.values() for p in ps]
+        if not paths:
+            return None
+        p = paths[rng.randrange(len(paths))]
+        img = self._donor_cache.get(p)
+        if img is None:
+            img = cv2.imread(str(p))
+            self._donor_cache[p] = img
+        return img
+
+
+class SynthTamperWrapper(Dataset, _DonorMixin):
+    """Train wrapper over a transform=None base dataset. With probability ``prob``
+    a BONA-FIDE (label 0) sample is turned into a synthetic fraud (label 1) by
+    ``synth_tamper`` before the transform; real frauds and untampered bona-fide
+    pass through unchanged. Tamper is fresh-random each epoch (train variety)."""
+
+    def __init__(self, base, transform, donor_pool, prob=0.3, text_prob=0.2, seed=0):
+        self.base = base
+        self.tf = transform
+        self.donor_pool = donor_pool
+        self.prob = float(prob)
+        self.text_prob = float(text_prob)
+        self.seed = int(seed)
+        self._donor_cache = {}
+
+    def __len__(self):
+        return len(self.base.samples)
+
+    def __getitem__(self, idx):
+        s = self.base.samples[idx]
+        src = s.card_path if s.card_path is not None else s.path
+        img = Image.open(src).convert("RGB")
+        label = s.label
+        if label == 0:
+            rng = random.Random()                      # fresh entropy -> varies per epoch
+            if rng.random() < self.prob:
+                donor = self._donor_bgr(s.type, rng)
+                if donor is not None:
+                    nrng = np.random.default_rng()
+                    bgr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+                    out, mode = synth_tamper(
+                        bgr, donor, rng, nrng, self.text_prob,
+                        allow_color_on_gray=(s.type == "BENIN/DL"))
+                    if mode != "none":
+                        img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+                        label = 1
+        return self.tf(img), label
+
+
+class SynthProbeDataset(Dataset, _DonorMixin):
+    """Deterministic val probe. Each val bona-fide contributes a CLEAN copy
+    (label 0) AND a TAMPERED twin (label 1) -- genuine negatives are kept in full
+    and matched by synthetic positives (50/50). The tamper is seeded per sample
+    so the probe is byte-identical every epoch: a stable checkpoint compass that,
+    unlike the in-domain clean val, does not saturate."""
+
+    def __init__(self, base_bona, transform, donor_pool, text_prob=0.2, seed=0):
+        self.base = base_bona                          # transform=None, val bona-fide only
+        self.tf = transform
+        self.donor_pool = donor_pool
+        self.text_prob = float(text_prob)
+        self.seed = int(seed)
+        self.n = len(base_bona.samples)
+        self._donor_cache = {}
+
+    def __len__(self):
+        return 2 * self.n
+
+    def __getitem__(self, idx):
+        clean = idx < self.n
+        i = idx if clean else idx - self.n
+        s = self.base.samples[i]
+        src = s.card_path if s.card_path is not None else s.path
+        img = Image.open(src).convert("RGB")
+        if clean:
+            return self.tf(img), 0
+        rng = random.Random(self.seed + i)             # deterministic per sample
+        nrng = np.random.default_rng(self.seed + i)
+        donor = self._donor_bgr(s.type, rng)
+        if donor is None:
+            return self.tf(img), 0
+        bgr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+        out, mode = synth_tamper(bgr, donor, rng, nrng, self.text_prob,
+                                 allow_color_on_gray=(s.type == "BENIN/DL"))
+        if mode == "none":
+            return self.tf(img), 0
+        img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+        return self.tf(img), 1

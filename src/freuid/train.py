@@ -121,6 +121,37 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
                                  regions_dir=_rdir, return_face_meta=rfm)
         val_ds = FreuidDataset(cfg.data_dir, "train", clean_tf, ids=val_ids,
                                regions_dir=_rdir, return_face_meta=rfm)
+    elif (cfg.extra.get("synth_tamper") or {}).get("enabled", False):
+        # 0.039 recipe + synthetic-fraud augmentation. Train: a fraction of bona-fide are
+        # tampered into fraud (label 1) each epoch (face-swap / field-carve, data-grounded).
+        # Val: a deterministic synth PROBE (clean bona 0 + tampered twin 1, 50/50) -- a
+        # non-saturating checkpoint compass, unlike the in-domain clean val which saturates.
+        from freuid.augment import (
+            SynthProbeDataset,
+            SynthTamperWrapper,
+            build_donor_pool,
+        )
+        st = cfg.extra["synth_tamper"]
+        train_tf = build_transforms(size, True, mean, std)   # same aug as the plain 0.039 path
+        donor_pool = build_donor_pool(
+            cfg.data_dir, seed=cfg.seed, per_type=int(st.get("donor_per_type", 48)))
+        base_train = FreuidDataset(cfg.data_dir, "train", None, ids=train_ids)
+        train_ds = SynthTamperWrapper(
+            base_train, train_tf, donor_pool,
+            prob=float(st.get("prob", 0.3)), text_prob=float(st.get("text_prob", 0.2)),
+            seed=cfg.seed,
+        )
+        base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
+        base_val.samples = [s for s in base_val.samples if s.label == 0]   # bona-fide only
+        val_ds = SynthProbeDataset(
+            base_val, clean_tf, donor_pool,
+            text_prob=float(st.get("text_prob", 0.2)), seed=cfg.seed,
+        )
+        print(
+            f"[train] synth_tamper prob={st.get('prob', 0.3)} "
+            f"text_prob={st.get('text_prob', 0.2)}: train={len(train_ds)} | "
+            f"probe val={len(val_ds)} ({len(base_val.samples)} bona x2, 50/50)"
+        )
     elif cfg.extra.get("analog_double", True):
         # partial (not a local closure) so DataLoader workers can pickle it under 'spawn'
         # (macOS default); calling it with a seed -> recapture pipeline (None=random, int=fixed).

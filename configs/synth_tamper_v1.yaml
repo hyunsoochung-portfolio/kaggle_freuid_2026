@@ -1,0 +1,49 @@
+# configs/synth_tamper_v1.yaml
+# The 0.039 winner (data_attention_noanalog) with ONE change: synthetic-fraud
+# augmentation on train + a synth PROBE for val/checkpoint selection.
+#
+# Everything about the MODEL and TRAINING recipe is byte-for-byte the 0.039
+# config (backbone, image_size, epochs, lr, wd, attn-pool, AUC loss, TTA, LLRD,
+# AMP). Added:
+#   - extra.synth_tamper: turn a fraction of bona-fide into synthetic fraud each
+#     epoch (face-swap / colour-on-gray[BENIN] / field-carve -- all data-grounded).
+#   - the val loader becomes a deterministic synth probe (clean bona 0 + tampered
+#     twin 1, 50/50) -> checkpoint on that non-saturating AuDET.
+#   - early_stop_patience: 3 (stop on 3 consecutive val_loss rises).
+# A/B question: does reproducing the observed digital tells beat the 0.039 baseline?
+
+name: synth_tamper_v1
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 12
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: false
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true
+  early_stop_patience: 3
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true
+  synth_tamper:
+    enabled: true
+    prob: 0.3           # fraction of bona-fide turned into synthetic fraud per epoch
+    text_prob: 0.2      # of tampered: 20% text (field-carve), 80% face
+    donor_per_type: 48  # face-swap donor pool size per doc type
