@@ -162,6 +162,7 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader, 
 
     synth_double = bool(cfg.extra.get("synth_tamper_double", False))
     synth_prob = float(cfg.extra.get("synth_tamper_prob", 0.0))
+    recapture_aug_prob = float(cfg.extra.get("recapture_aug_prob", 0.0))
     if synth_double:
         from torch.utils.data import ConcatDataset
         from freuid.augment import SynthTamperDataset, recapture_transforms
@@ -192,6 +193,21 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader, 
             f"[train] synth_tamper: prob={synth_prob:.2f} "
             f"| {_n_bona} bona-fide -> ~{int(_n_bona * synth_prob)} synthetic positives/epoch "
             f"| donor_pool={len(train_ds._donor_pool)}"
+        )
+    elif recapture_aug_prob > 0.0:
+        from freuid.augment import RecaptureAugWrapper, recapture_transforms
+        _base_train_ds = FreuidDataset(
+            cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir,
+            return_face_meta=return_face_meta,
+        )
+        _recap_tf = recapture_transforms(size, mean, std)
+        train_ds = RecaptureAugWrapper(
+            _base_train_ds, clean_transform=train_tf, recapture_transform=_recap_tf,
+            prob=recapture_aug_prob, seed=cfg.seed,
+        )
+        print(
+            f"[train] recapture_aug: prob={recapture_aug_prob:.2f} "
+            f"| {len(_base_train_ds)} samples, labels unchanged"
         )
     else:
         train_ds = FreuidDataset(

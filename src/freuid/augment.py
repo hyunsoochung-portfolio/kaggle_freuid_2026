@@ -311,3 +311,53 @@ class SynthTamperDataset(Dataset):
         if self._return_face_meta:
             return img_out, 1, torch.zeros(FACE_META_DIM, dtype=torch.float32)
         return img_out, 1
+
+
+class RecaptureAugWrapper(Dataset):
+    """Wraps a FreuidDataset, applying print-and-recapture degradation
+    (recapture_transforms) to a random fraction of ALL samples regardless of
+    label (bona-fide or fraud). Unlike SynthTamperWrapper, this never changes
+    the label -- it exists purely to expose the model to realistic capture-
+    pipeline degradation (JPEG re-compression, downscale, blur, noise, mild
+    geometry) during training, since the competition's private test set
+    emphasises non-synthetic, physically-recaptured examples over clean or
+    purely-digital ones.
+
+    The base dataset must be created with transform=None so this wrapper
+    owns all transform decisions.
+    """
+
+    def __init__(
+        self,
+        base: Dataset,
+        clean_transform,
+        recapture_transform,
+        prob: float,
+        seed: int = 0,
+    ) -> None:
+        self.base = base
+        self.clean_tf = clean_transform
+        self.recapture_tf = recapture_transform
+        self.prob = prob
+        self._rng = np.random.default_rng(seed)
+        self._return_face_meta = getattr(base, "_return_face_meta", False)
+
+    def __len__(self) -> int:
+        return len(self.base)  # type: ignore[arg-type]
+
+    def __getitem__(self, idx: int):
+        sample = self.base.samples[idx]  # type: ignore[attr-defined]
+        src = sample.card_path if sample.card_path is not None else sample.path
+        img_pil = Image.open(src).convert("RGB")
+        img_size = img_pil.size
+        label = sample.label
+
+        if self._rng.random() < self.prob:
+            img_out = self.recapture_tf(img_pil)
+        else:
+            img_out = self.clean_tf(img_pil) if self.clean_tf is not None else img_pil
+
+        if self._return_face_meta:
+            return img_out, label, face_meta_tensor(sample, img_size)
+        return img_out, label
+
