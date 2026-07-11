@@ -21,20 +21,4 @@ val_fraction: 0.1
 extra:
   augment: recapture
 
-  # Synthetic-tamper: manufacture analog-fraud positives from bona-fide images.
-  # 30% of bona-fide samples per batch become synthetic positives (label=1),
-  # each with one random edit (copy-move, local-splice, or field-smudge)
-  # passed through recapture_transforms so the edit is seen through the analog hole.
-  synth_tamper_prob: 0.3
-
-  use_recapture_probe: true
-  recapture_probe_seed: 1234
-  checkpoint_metric: probe_audet
   missing_id_score: 0.5
-
-  val_doc_types:
-    - EGYPT/DL
-    - GUINEA/DL
-    - BENIN/DL
-    - MOZAMBIQUE/DL
-    - MAURITIUS/ID

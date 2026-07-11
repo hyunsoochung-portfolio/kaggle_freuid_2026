@@ -1,0 +1,42 @@
+# configs/joint_consistency_v2.yaml
+# model_type=joint with consist_type=conv: the winning attention-pool baseline (public
+# 0.03935), UNCHANGED, + a parallel POSITION-INVARIANT consistency branch. The conv branch
+# runs a shared conv over the patch-feature grid (translation-equivariant seam detector) and
+# global-max-pools (translation-invariant), so a tamper anywhere -> high score regardless of
+# location -- unlike the attention pool / v1 patch head, which are position-aware.
+# final = logit_global + logit_consist (consist zero-init -> starts == baseline).
+#
+# Same recipe as the winner: analog OFF, AUC, TTA, submit LAST epoch. Max 20 epochs,
+# early-stop if val_loss rises 3 epochs in a row.
+
+name: joint_consistency_v2
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  model_type: joint
+  consist_type: conv        # v2 position-invariant conv + global-max-pool head
+  conv_hidden: 256
+  conv_dropout: 0.1
+  pool: map                 # global branch = attention pooling (the 0.039 model)
+  head_dropout: 0.1
+  analog_double: false
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true
+  early_stop_patience: 3
+  warmup_epochs: 2
+  amp: true

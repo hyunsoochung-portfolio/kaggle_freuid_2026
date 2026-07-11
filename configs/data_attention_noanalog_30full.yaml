@@ -1,0 +1,36 @@
+# configs/data_attention_noanalog_30full.yaml
+# Winning recipe (noanalog + attn-pool + AUC + TTA) to a FULL 30 epochs, NO early-stop, so
+# the LR cosine fully anneals and we submit the converged ep30 (save_last). Tests whether more
+# training + full annealing beats the 12ep run's ep12 (0.03935). Early-stop was removed because
+# stopping on the saturated val_loss cut annealing short (ep9 = 0.055, worse than ep12).
+
+name: data_attention_noanalog_30full
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 30                 # full run, no early-stop
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: false
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true          # submit the converged last epoch (ep30)
+  # no early_stop_patience -> runs all 30 epochs
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true

@@ -2,7 +2,7 @@
 
 Trains the consistency model for a few epochs under each head combination (global-only,
 patch-only, face-only, all-fused) on the same data/split/seed, and reports the best
-probe_audet reached by each -- the S3 gate requires each head to help alone, and the
+val AuDET reached by each -- the S3 gate requires each head to help alone, and the
 full fusion to be at least as good as the best single head.
 
 Usage (run from repo root on the VESSL workspace, where the regions cache + data + GPU live):
@@ -22,8 +22,9 @@ import copy
 import torch
 
 from freuid.config import load_config
+from freuid.metrics import evaluate
 from freuid.models import build_consistency_model
-from freuid.train import _run_probe, build_loaders, run_epoch
+from freuid.train import build_loaders, run_epoch
 from freuid.transforms import resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
@@ -46,26 +47,24 @@ def run_combo(name: str, use_patch: bool, use_face: bool, base_cfg, epochs: int)
     seed_everything(cfg.seed)
     device = pick_device()
     data_cfg = resolve_data_config(cfg.backbone, cfg.image_size)
-    train_loader, val_loader, probe_loader = build_loaders(cfg, data_cfg)
-    if probe_loader is None:
-        raise SystemExit("ablation harness requires extra.use_recapture_probe: true in the config")
+    train_loader, val_loader = build_loaders(cfg, data_cfg)
 
     model = build_consistency_model(cfg).to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
     trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    probe_seed = cfg.extra.get("recapture_probe_seed", 0)
 
-    best_probe = float("inf")
+    best_audet = float("inf")
     for epoch in range(1, cfg.epochs + 1):
         train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer)
-        pm = _run_probe(model, probe_loader, device, criterion, probe_seed)
-        best_probe = min(best_probe, pm["audet"])
+        _, val_scores, val_labels = run_epoch(model, val_loader, device, criterion)
+        m = evaluate(val_scores, val_labels)
+        best_audet = min(best_audet, m["audet"])
         print(
             f"  [{name}] epoch {epoch}/{cfg.epochs} train_loss={train_loss:.4f} "
-            f"probe_AuDET={pm['audet']:.6f} (best={best_probe:.6f})"
+            f"val_AuDET={m['audet']:.6f} (best={best_audet:.6f})"
         )
-    return best_probe
+    return best_audet
 
 
 def main() -> None:
@@ -88,9 +87,9 @@ def main() -> None:
         print(f"\n=== {name} (patch={use_patch} face={use_face}) ===")
         results[name] = run_combo(name, use_patch, use_face, base_cfg, args.epochs)
 
-    print("\n=== S3 ablation summary (lower probe_AuDET is better) ===")
+    print("\n=== S3 ablation summary (lower val_AuDET is better) ===")
     for name, score in sorted(results.items(), key=lambda kv: kv[1]):
-        print(f"  {name:<12} probe_AuDET={score:.6f}")
+        print(f"  {name:<12} val_AuDET={score:.6f}")
 
     single_heads = {k: v for k, v in results.items() if k != "fusion_all"}
     if single_heads and "fusion_all" in results:

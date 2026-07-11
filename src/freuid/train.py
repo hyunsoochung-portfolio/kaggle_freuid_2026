@@ -1,15 +1,27 @@
 """Training entrypoint.
 
 model=twostream (extra) selects the two-stream (full+face+ela) path, kept as an
-isolated side path with its own simpler loop. Everything else (baseline/consistency,
-LLRD, sanity checks, recapture probe, synth tamper) is develop's existing pipeline,
-unchanged.
+isolated side path with its own simpler loop.
+
+Baseline/consistency/joint path supports: stratified random split; model_type in
+{baseline, consistency, joint}; data-grounded synth_tamper augmentation
+(extra.synth_tamper.enabled) with a non-saturating val probe; analog_double
+(extra.analog_double, default False -- proven harmful alone, see
+data_attention_noanalog); and an optional separate recapture probe
+(extra.use_recapture_probe) for checkpoint selection on top of a plain/clean val.
+
+Note: LODO (leave-one-domain-out) was tried and dropped. It withholds real training
+data for a domain that IS present in the actual test set (unlike the private set's
+truly-unseen domains, for which no one has training data regardless), so it only
+hurts real submission score without a matching benefit -- confirmed both by our own
+ablation and by the team's own testing.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import math
 import random
 from pathlib import Path
@@ -23,7 +35,6 @@ from freuid.data import (
     FreuidDataset,
     TwoStreamDataset,
     domain_holdout_split,
-    lodo_split,
     stratified_split,
     unpack_batch,
 )
@@ -34,10 +45,21 @@ from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
 
-def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: float = 0.0, scaler=None):
-    """One pass over FreuidDataset-shaped batches. With an optimizer it trains;
-    without, it evaluates. auc_weight > 0 adds a pairwise soft-AUC term to BCE
-    (train only); auc_weight=0.0 is bit-for-bit identical to plain BCE.
+def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: float = 0.0,
+              scaler=None):
+    """One pass. With an optimizer it trains; without, it evaluates.
+
+    Returns (mean_loss, scores, labels) where scores = P(fraud). In train mode the
+    scores/labels are not collected (they would force a GPU->CPU sync every batch and
+    are unused), so both are returned as None.
+
+    auc_weight > 0 adds a pairwise soft-AUC term to the BCE loss (train only).
+    auc_weight = 0.0 is bit-for-bit identical to plain BCE.
+
+    ``scaler`` (a ``torch.cuda.amp.GradScaler``) enables AMP (autocast + loss scaling)
+    when non-None and ``scaler.is_enabled()``; omitting it (the default for every
+    existing config) reproduces the original FP32 path exactly -- a disabled GradScaler
+    is a documented no-op passthrough for scale/step/update.
     """
     is_train = optimizer is not None
     model.train(is_train)
@@ -111,10 +133,11 @@ def run_epoch_twostream(model, loader, device, criterion, optimizer=None, scaler
 
 
 def _split_ids(cfg: Config) -> tuple[set[str], set[str]]:
-    """Train/val id split for the baseline/consistency path: LODO if val_doc_type
-    is set, else stratified."""
-    if cfg.val_doc_type:
-        return lodo_split(cfg.data_dir, cfg.val_doc_type)
+    """Train/val id split for the baseline/consistency/joint path (stratified random
+    split only -- LODO was tried and dropped: it withholds real training data for a
+    domain that IS present in the actual test set, unlike the private set's truly-
+    unseen domains, so it only hurts real submission score without a matching
+    benefit)."""
     return stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
 
 
@@ -138,14 +161,28 @@ def _resolve_split_ids(cfg: Config):
 
 
 def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader, DataLoader | None]:
+    """Train/val loaders for the baseline/consistency/joint path.
+
+    Split: stratified random split. Train/val dataset construction depends on
+    cfg.extra:
+      - model_type == "consistency": plain FreuidDataset (needs face-region metadata).
+      - extra.synth_tamper.enabled: data-grounded synthetic-fraud augmentation
+        (face-swap / field-carve, donor pool matched per doc type) + a non-saturating
+        synth or recapture probe as val (extra.synth_tamper.val_probe).
+      - extra.analog_double (default False -- proven harmful alone; see
+        data_attention_noanalog): doubles digital images with a recaptured twin.
+      - else: plain FreuidDataset train + clean val -- the safe default matching every
+        pre-existing config that doesn't know about the two flags above.
+    An optional separate `probe_loader` (extra.use_recapture_probe) applies
+    recapture_transforms to the held-out split as a non-saturating checkpoint compass,
+    independent of the val_ds-is-already-hard designs above.
+    """
     train_ids, val_ids = _split_ids(cfg)
     if cfg.limit:
         train_ids = set(sorted(train_ids)[: cfg.limit])
         val_ids = set(sorted(val_ids)[: max(1, cfg.limit // 5)])
     size, mean, std = data_cfg["image_size"], data_cfg["mean"], data_cfg["std"]
-    augment = cfg.extra.get("augment")
-    train_tf = build_transforms(size, True, mean, std, augment=augment)
-    val_tf = build_transforms(size, False, mean, std)
+    clean_tf = build_transforms(size, False, mean, std)
 
     _rdir: Path | None = None
     if cfg.extra.get("use_rectify", False):
@@ -160,64 +197,69 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader, 
     model_type = cfg.extra.get("model_type", "baseline")
     return_face_meta = model_type == "consistency" and bool(cfg.extra.get("use_face_region", False))
 
-    synth_double = bool(cfg.extra.get("synth_tamper_double", False))
-    synth_prob = float(cfg.extra.get("synth_tamper_prob", 0.0))
-    recapture_aug_prob = float(cfg.extra.get("recapture_aug_prob", 0.0))
-    if synth_double:
-        from torch.utils.data import ConcatDataset
-        from freuid.augment import SynthTamperDataset, recapture_transforms
-        _base_train_ds = FreuidDataset(
-            cfg.data_dir, "train", train_tf, ids=train_ids, regions_dir=_rdir,
-            return_face_meta=return_face_meta,
+    if model_type == "consistency":
+        train_tf = build_transforms(size, True, mean, std, augment=cfg.extra.get("augment"))
+        train_ds = FreuidDataset(cfg.data_dir, "train", train_tf, ids=train_ids,
+                                 regions_dir=_rdir, return_face_meta=return_face_meta)
+        val_ds = FreuidDataset(cfg.data_dir, "train", clean_tf, ids=val_ids,
+                               regions_dir=_rdir, return_face_meta=return_face_meta)
+    elif (cfg.extra.get("synth_tamper") or {}).get("enabled", False):
+        # data-grounded synthetic-fraud augmentation + non-saturating val probe.
+        from freuid.augment import (
+            AnalogDoubleDataset,
+            SynthProbeDataset,
+            SynthTamperWrapper,
+            build_donor_pool,
+            recapture_v2_transforms,
         )
-        _tamper_tf = recapture_transforms(size, mean, std)
-        _synth_ds = SynthTamperDataset(_base_train_ds, tamper_transform=_tamper_tf, seed=cfg.seed)
-        train_ds = ConcatDataset([_base_train_ds, _synth_ds])
-        print(
-            f"[train] synth_tamper_double: {len(_base_train_ds)} original + "
-            f"{len(_synth_ds)} synthetic (from bona-fide) = {len(train_ds)} total/epoch"
-        )
-    elif synth_prob > 0.0:
-        from freuid.augment import SynthTamperWrapper, recapture_transforms
-        _base_train_ds = FreuidDataset(
-            cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir,
-            return_face_meta=return_face_meta,
-        )
-        _tamper_tf = recapture_transforms(size, mean, std)
+        st = cfg.extra["synth_tamper"]
+        train_tf = build_transforms(size, True, mean, std)
+        donor_pool = build_donor_pool(
+            cfg.data_dir, seed=cfg.seed, per_type=int(st.get("donor_per_type", 48)),
+            exclude_ids=val_ids)   # keep val images out of the donor pool (no leakage)
+        base_train = FreuidDataset(cfg.data_dir, "train", None, ids=train_ids)
         train_ds = SynthTamperWrapper(
-            _base_train_ds, clean_transform=train_tf, tamper_transform=_tamper_tf,
-            prob=synth_prob, seed=cfg.seed,
+            base_train, train_tf, donor_pool,
+            prob=float(st.get("prob", 0.3)), text_prob=float(st.get("text_prob", 0.2)),
+            recapture_prob=float(st.get("recapture_prob", 0.0)), seed=cfg.seed,
         )
-        _n_bona = sum(1 for s in _base_train_ds.samples if s.label == 0)
+        if st.get("val_probe", "synth") == "recapture":
+            make_rc = functools.partial(recapture_v2_transforms, size, mean, std)
+            base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
+            val_ds = AnalogDoubleDataset(base_val, clean_tf, make_rc, deterministic_seed=cfg.seed)
+            probe_desc = (f"recapture probe {len(base_val.samples)}+{len(val_ds.analog_idx)}"
+                          f"={len(val_ds)} (clean+analog, labels kept)")
+        else:
+            base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
+            base_val.samples = [s for s in base_val.samples if s.label == 0]   # bona only
+            val_ds = SynthProbeDataset(base_val, clean_tf, donor_pool,
+                                       text_prob=float(st.get("text_prob", 0.2)), seed=cfg.seed)
+            probe_desc = f"synth probe {len(val_ds)} ({len(base_val.samples)} bona x2, 50/50)"
         print(
-            f"[train] synth_tamper: prob={synth_prob:.2f} "
-            f"| {_n_bona} bona-fide -> ~{int(_n_bona * synth_prob)} synthetic positives/epoch "
-            f"| donor_pool={len(train_ds._donor_pool)}"
+            f"[train] synth_tamper prob={st.get('prob', 0.3)} "
+            f"recapture_prob={st.get('recapture_prob', 0.0)}: train={len(train_ds)} | {probe_desc}"
         )
-    elif recapture_aug_prob > 0.0:
-        from freuid.augment import RecaptureAugWrapper, recapture_transforms
-        _base_train_ds = FreuidDataset(
-            cfg.data_dir, "train", None, ids=train_ids, regions_dir=_rdir,
-            return_face_meta=return_face_meta,
-        )
-        _recap_tf = recapture_transforms(size, mean, std)
-        train_ds = RecaptureAugWrapper(
-            _base_train_ds, clean_transform=train_tf, recapture_transform=_recap_tf,
-            prob=recapture_aug_prob, seed=cfg.seed,
-        )
+    elif cfg.extra.get("analog_double", False):
+        # NOTE: default False (not True) -- analog-double alone was found harmful
+        # (dinov2_analog 0.115 vs dinov2_v1 0.0686). Opt in explicitly if retesting.
+        from freuid.augment import AnalogDoubleDataset, recapture_transforms
+        make_analog = functools.partial(recapture_transforms, size, mean, std)
+        base_train = FreuidDataset(cfg.data_dir, "train", None, ids=train_ids)
+        base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
+        train_ds = AnalogDoubleDataset(base_train, clean_tf, make_analog)
+        val_ds = AnalogDoubleDataset(base_val, clean_tf, make_analog, deterministic_seed=cfg.seed)
         print(
-            f"[train] recapture_aug: prob={recapture_aug_prob:.2f} "
-            f"| {len(_base_train_ds)} samples, labels unchanged"
+            f"[train] analog_double: train {len(base_train.samples)}+{len(train_ds.analog_idx)}"
+            f"={len(train_ds)} | val {len(base_val.samples)}+{len(val_ds.analog_idx)}={len(val_ds)}"
         )
     else:
-        train_ds = FreuidDataset(
-            cfg.data_dir, "train", train_tf, ids=train_ids, regions_dir=_rdir,
-            return_face_meta=return_face_meta,
-        )
-    val_ds = FreuidDataset(
-        cfg.data_dir, "train", val_tf, ids=val_ids, regions_dir=_rdir,
-        return_face_meta=return_face_meta,
-    )
+        train_tf = build_transforms(size, True, mean, std, augment=cfg.extra.get("augment"))
+        train_ds = FreuidDataset(cfg.data_dir, "train", train_tf, ids=train_ids,
+                                 regions_dir=_rdir, return_face_meta=return_face_meta)
+        val_ds = FreuidDataset(cfg.data_dir, "train", clean_tf, ids=val_ids,
+                               regions_dir=_rdir, return_face_meta=return_face_meta)
+        print(f"[train] plain: train {len(train_ds)} | val {len(val_ds)}")
+
     pin_memory = torch.cuda.is_available()
     train_loader = DataLoader(
         train_ds, batch_size=cfg.batch_size, shuffle=True,
@@ -288,7 +330,13 @@ def _check_init_loss(model, loader, device, criterion, tol: float = 0.3) -> None
     print(f"[sanity] init BCE={loss:.4f} ~= ln2={expected:.4f} (tol={tol}) OK")
 
 
-def _sanity_overfit(model, loader, device, criterion, steps: int = 100, target: float = 0.02) -> None:
+def _sanity_overfit(model, loader, device, criterion, steps: int = 100,
+                    target: float = 0.02) -> None:
+    """Overfit a single batch to near-zero loss; asserts the forward+backward path works.
+
+    Runs on a COPY of the model so the real training weights are untouched.
+    Uses SGD (no momentum) so convergence is purely the model's capacity.
+    """
     import copy
     m = copy.deepcopy(model)
     imgs, labels, face_meta = unpack_batch(next(iter(loader)))
@@ -311,7 +359,6 @@ def _sanity_overfit(model, loader, device, criterion, steps: int = 100, target: 
         "Check: gradient flow not blocked, model has enough capacity for one batch."
     )
     print(f"[sanity] single-batch overfit: loss={final:.6f} after {steps} steps OK")
-
 
 
 def _safe_save(state: dict, ckpt_path: Path, retries: int = 3, delay: float = 2.0) -> bool:
@@ -389,20 +436,27 @@ def main():
                 print(f"  -> saved {ckpt} (AuDET={best_audet:.4f})")
         return
 
-    # --- baseline / consistency path (develop's existing pipeline, unchanged) ---
+    # --- baseline / consistency / joint path ---
     train_loader, val_loader, probe_loader = build_loaders(cfg, data_cfg)
     print(f"[train] config '{cfg.name}' | device={device} | backbone={cfg.backbone} | "
           f"image_size={data_cfg['image_size']} mean={data_cfg['mean']}")
     print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
-    if probe_loader is not None:
-        print(f"[train] probe={len(probe_loader.dataset)} (recapture, seed={cfg.extra.get('recapture_probe_seed', 0)})")
 
     model_type = cfg.extra.get("model_type", "baseline")
     if model_type == "consistency":
         from freuid.models import build_consistency_model
         model = build_consistency_model(cfg).to(device)
+    elif model_type == "joint":
+        # full-FT attention-pool backbone + parallel patch-consistency branch, fused.
+        from freuid.models import build_joint_model
+        model = build_joint_model(cfg).to(device)
     else:
-        model = build_model(cfg.backbone, cfg.pretrained).to(device)
+        model = build_model(
+            cfg.backbone, cfg.pretrained,
+            pool=cfg.extra.get("pool"),
+            head_dropout=float(cfg.extra.get("head_dropout", 0.0)),
+        ).to(device)
+        # Fine-tuning knobs (baseline/ViT path only; frozen consistency path untouched).
         train_last_k = cfg.extra.get("train_last_k_blocks")
         if train_last_k is not None:
             from freuid.optim import freeze_all_but_last_k_blocks
@@ -412,7 +466,8 @@ def main():
                 model.set_grad_checkpointing(True)
                 print("[train] gradient checkpointing enabled")
             else:
-                print(f"[train] WARNING: grad_checkpointing=True but {cfg.backbone} has no set_grad_checkpointing")
+                print(f"[train] WARNING: grad_checkpointing=True but {cfg.backbone} "
+                      "has no set_grad_checkpointing")
 
     criterion = torch.nn.BCEWithLogitsLoss()
     _check_init_loss(model, train_loader, device, criterion)
@@ -436,7 +491,13 @@ def main():
     else:
         trainable = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
+        # Optional linear warmup (extra.warmup_epochs) then cosine decay; else plain cosine.
+        warmup_e = int(cfg.extra.get("warmup_epochs", 0))
+        if warmup_e > 0:
+            from freuid.optim import build_warmup_cosine_scheduler
+            scheduler = build_warmup_cosine_scheduler(optimizer, cfg.epochs, warmup_epochs=warmup_e)
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
 
     auc_weight = float(cfg.extra.get("auc_loss_weight", 0.0))
     if auc_weight > 0.0:
@@ -454,29 +515,39 @@ def main():
     Path("checkpoints").mkdir(exist_ok=True)
     best_metric = float("inf")
     best_tiebreak = float("inf")
+    # Early stopping: stop once val_loss rises for `early_stop_patience` epochs in a row
+    # (0 = disabled). Guards against overtraining when running to a large epochs ceiling.
+    es_patience = int(cfg.extra.get("early_stop_patience", 0))
+    prev_val_loss = float("inf")
+    val_rises = 0
     for epoch in range(1, cfg.epochs + 1):
-        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer, auc_weight, scaler=scaler)
-        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion, scaler=scaler)
+        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer,
+                                   auc_weight, scaler=scaler)
+        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion,
+                                                     scaler=scaler)
         m = evaluate(val_scores, val_labels)
         last_lrs = scheduler.get_last_lr()
         lr = last_lrs[0] if len(last_lrs) == 1 else max(last_lrs)
         scheduler.step()
 
+        probe_m = None
         probe_str = ""
         if probe_loader is not None:
-            pm = _run_probe(model, probe_loader, device, criterion, probe_seed, scaler=scaler)
-            m["probe_audet"] = pm["audet"]
-            m["probe_apcer_at_1pct_bpcer"] = pm["apcer_at_1pct_bpcer"]
-            probe_str = f" probe_AuDET={m['probe_audet']:.6f}"
+            probe_m = _run_probe(model, probe_loader, device, criterion, seed=int(probe_seed), scaler=scaler)
+            probe_str = f" probe_AuDET={probe_m['audet']:.6f}"
 
-        lr_str = f"lr={lr:.2e}" if len(last_lrs) == 1 else f"lr_head={lr:.2e} lr_min={min(last_lrs):.2e}"
+        lr_str = (f"lr={lr:.2e}" if len(last_lrs) == 1
+                  else f"lr_head={lr:.2e} lr_min={min(last_lrs):.2e}")
         print(
-            f"\n[epoch {epoch:>2}/{cfg.epochs}] {lr_str} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-            f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}{probe_str}"
+            f"\n[epoch {epoch:>2}/{cfg.epochs}] {lr_str} train_loss={train_loss:.4f} "
+            f"val_loss={val_loss:.4f} AuDET={m['audet']:.4f} "
+            f"APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}{probe_str}"
         )
 
-        current = m.get(ckpt_key, m["audet"])
-        current_tie = m.get(tie_key, float("inf")) if tie_key else float("inf")
+        if ckpt_key.startswith("probe_") and probe_m is not None:
+            current, current_tie = probe_m["audet"], probe_m.get("apcer_at_1pct_bpcer", 0.0)
+        else:
+            current, current_tie = m["audet"], m["apcer_at_1pct_bpcer"]
         improved = current < best_metric or (current == best_metric and current_tie < best_tiebreak)
         if improved:
             best_metric = current
@@ -487,6 +558,26 @@ def main():
                 ckpt,
             )
             print(f"  -> saved {ckpt} ({ckpt_key}={best_metric:.6f})")
+
+        # Optionally also keep the LATEST epoch's weights (overwritten each epoch). Useful when
+        # the val metric saturates and best-val locks onto an early/undertrained epoch.
+        if cfg.extra.get("save_last", False):
+            last_ckpt = Path("checkpoints") / f"{cfg.name}_last.pt"
+            torch.save(
+                {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
+                last_ckpt,
+            )
+            print(f"  -> saved {last_ckpt} (last, epoch={epoch})")
+
+        # Early stop on consecutive val_loss rises (checked after saving, so the last
+        # checkpoint includes this epoch). val_loss is noisy here, so patience>=3 is advised.
+        if es_patience > 0:
+            val_rises = val_rises + 1 if val_loss > prev_val_loss else 0
+            prev_val_loss = val_loss
+            if val_rises >= es_patience:
+                print(f"[early-stop] val_loss rose {val_rises} epochs in a row "
+                      f"(patience={es_patience}) -> stopping at epoch {epoch}")
+                break
 
 
 if __name__ == "__main__":

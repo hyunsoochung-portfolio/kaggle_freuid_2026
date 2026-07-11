@@ -6,9 +6,9 @@ Generates:
   2. tamper_examples.png -- one bona-fide source image, original vs. each of the three
      synthetic tamper types (copy_move, field_smudge, local_splice), edited region boxed.
   3. tamper_then_recapture.png -- the same three tampered images, additionally passed
-     through the full recapture chain -- this is what the model actually trains on for
-     synthetic positives (SynthTamperWrapper always routes tampered images through
-     recapture_transforms, never raw).
+     through the full recapture chain (tamper-then-recapture is the order a synthetic
+     positive would take). Illustrative only: the synthetic-tamper training path was
+     removed when analog-double became the default, so the model no longer trains on these.
 
 Reuses augment.py's recapture_transforms directly (no changes to training code) and
 tamper_bbox.py's replicated tamper functions (for the bbox overlay only -- illustrative,

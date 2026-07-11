@@ -65,25 +65,15 @@ OverlayDataset (MTCNN face crop → cache)  →  get_overlay_{train,val}_transfo
 
 ---
 
-## Validation split strategies
+## Validation split
 
-Both return `(train_ids, val_ids)` as sets of id strings. Selected by `_split_ids(cfg)` in `train.py`.
-
-### Stratified split (default when `val_doc_type` is not set)
+Returns `(train_ids, val_ids)` as sets of id strings, wired up in `build_loaders`.
 
 `stratified_split(root, val_fraction=0.1, seed=42)`
 
-Groups by `(label, type)`, samples `val_fraction` from each stratum (minimum 1). All 5 document types and both classes appear in both train and val. Good for measuring in-domain performance but optimistic about generalization.
+Groups by `(label, type)`, samples `val_fraction` from each stratum (minimum 1). All 5 document types and both classes appear in both train and val. Good for measuring in-domain performance but optimistic about generalization: because every document type is present in both splits, val AuDET says nothing about transfer to the unseen document types in the hidden test. Stratifying by type is still worthwhile — it keeps the val set representative of the type mix and prevents any type from being silently dropped from validation.
 
-### Leave-One-Domain-Out / LODO (when `val_doc_type` is set in config)
-
-`lodo_split(root, val_doc_type)`
-
-Holds out **one entire document type** for validation; train sees the remaining types only. Train and val share no document domain → val AuDET measures cross-domain transfer, which is a more honest proxy for the private test. Validates that the held-out type has both classes before proceeding (prevents `roc_auc_score` crash).
-
-**Default held-out type**: `MAURITIUS/ID` (the only `/ID` type; the others are `/DL`).
-
-**Observed issue**: When `val_doc_type: MAURITIUS/ID`, the overlay model achieves near-zero AuDET (~0.0006) from epoch 1 and never improves meaningfully. This means MAURITIUS/ID may be too easy a target for the overlay detector. The near-zero val AuDET did **not** predict the public leaderboard score — significant divergence was observed, confirming the generalization gap.
+The hidden test probes generalization to document types the model never trains on, so expect the public leaderboard to diverge from local val AuDET regardless of split — the in-domain val score is an optimistic upper bound, not a private-test proxy.
 
 ---
 
@@ -137,8 +127,7 @@ Known fields (all optional with defaults):
 | `seed` | `42` | |
 | `data_dir` | `"data"` | Root of the data directory |
 | `image_size` | `None` | `None` → backbone's native resolution |
-| `val_fraction` | `0.1` | Used by stratified split only |
-| `val_doc_type` | `None` | Set to enable LODO (e.g. `"MAURITIUS/ID"`) |
+| `val_fraction` | `0.1` | Fraction sampled per `(label, type)` stratum for the val split |
 | `backbone` | `"tf_efficientnetv2_s.in21k"` | Any timm name |
 | `pretrained` | `True` | |
 | `epochs` | `20` | |
@@ -167,8 +156,7 @@ Any unknown key lands in `cfg.extra` — used for overlay-specific knobs (`model
 | Issue | Impact |
 |---|---|
 | HorizontalFlip in overlay transforms | Feeds semantically invalid (mirrored text) inputs to the noise stream |
-| Val AuDET near-zero on MAURITIUS/ID from epoch 1 | Makes checkpoint selection by AuDET effectively random; val_loss is more informative in this regime |
-| Public LB diverges significantly from local val AuDET | Model generalizes poorly to unseen document types; LODO on 5 known types is an insufficient generalization signal |
+| Public LB diverges significantly from local val AuDET | Model generalizes poorly to unseen document types; the in-domain stratified val (all 5 known types present in both splits) is an optimistic signal, not a private-test proxy |
 | 99.97% digital training data | Print-and-capture attacks in the test set are essentially OOD |
 | No AMP | Training is slower than necessary; ~1.5–2× throughput available with autocast + GradScaler |
 | No sanity checks | Init-loss and batch-overfit checks are not wired into the current training loop |

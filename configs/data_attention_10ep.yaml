@@ -1,0 +1,32 @@
+# configs/data_attention_10ep.yaml
+# Identical to data_attention_v1.yaml but 10 epochs (shorter run for a first GPU pass).
+# See data_attention_v1.yaml for the full rationale (analog-double data, attention-pool
+# head, AUC ranking loss, multi-scale TTA, LLRD + warmup + AMP).
+
+name: data_attention_10ep
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 10                 # shorter first pass (v1 runs 20)
+batch_size: 32
+lr: 1.0e-4
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1          # label×type stratified split (every doc type represented)
+
+extra:
+  pool: map                # attention-pool head
+  auc_loss_weight: 0.1     # pairwise ranking loss
+  tta: [476, 518, 560]     # multi-scale TTA at inference
+  missing_id_score: 0.5
+
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true

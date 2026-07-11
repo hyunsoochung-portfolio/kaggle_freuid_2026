@@ -1,0 +1,42 @@
+# configs/joint_consistency_v1.yaml
+# model_type=joint: the winning attention-pool baseline (public 0.03935) + a parallel
+# patch-consistency branch on the same backbone patch tokens, fused (final = logit_global +
+# logit_consist). Both branches full-fine-tuned end-to-end. Zero-init consist_fc => starts
+# exactly as the 0.039 baseline and only opens the consistency branch if it lowers loss.
+#
+# Same data/recipe as the winner: analog OFF, attn-pool, AUC ranking loss, multi-scale TTA,
+# submit the LAST epoch (best-val locks early on the saturated clean val). Max 20 epochs,
+# early-stop if val_loss rises 3 epochs in a row.
+
+name: joint_consistency_v1
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  model_type: joint         # -> build_joint_model (attn-pool global + patch-consistency)
+  pool: map                 # global branch = attention pooling
+  head_dropout: 0.1
+  analog_double: false      # plain data (analog-double hurt)
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true           # submit the last epoch, not best-val
+  early_stop_patience: 3    # stop if val_loss rises 3 epochs in a row (max 20)
+  warmup_epochs: 2          # joint uses plain AdamW + warmup->cosine (no LLRD)
+  # consistency branch (PatchConsistencyHead)
+  patch_consistency_layers: 2
+  patch_consistency_heads: 8
+  patch_consistency_dropout: 0.1
+  amp: true

@@ -1,0 +1,33 @@
+# configs/dinov2_repro.yaml
+# A/B baseline (analog-double OFF). Reproduces the dinov2_v1 recipe (public 0.0686) on the
+# feat/data-attention codebase: plain single-copy data + clean val, NO AUC loss, NO TTA.
+# Identical to dinov2_analog.yaml EXCEPT extra.analog_double=false — so the pair isolates
+# exactly the analog-double augmentation.
+
+name: dinov2_repro
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 6
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: false     # OFF: plain single-copy (= dinov2_v1). The A/B variable.
+  missing_id_score: 0.5
+  # no auc_loss_weight, no tta -> matches dinov2_v1
+  llrd:
+    enabled: true
+    decay: 0.75
+    warmup_epochs: 1
+  amp: true

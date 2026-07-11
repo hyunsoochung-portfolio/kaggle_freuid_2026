@@ -71,6 +71,10 @@ def audet(scores: ArrayLike, labels: ArrayLike) -> float:
     labels = np.asarray(labels, dtype=int)
     if not np.isin(labels, (0, 1)).all():
         raise ValueError("labels must be 0 (bona-fide) or 1 (fraud)")
+    # AUC is undefined with only one class present (roc_auc_score returns nan). Raise instead,
+    # matching apcer_at_bpcer, so evaluate() fails uniformly rather than half-computing.
+    if np.unique(labels).size < 2:
+        raise ValueError("need at least one bona-fide and one fraud sample")
     return float(1.0 - roc_auc_score(labels, scores))
 
 

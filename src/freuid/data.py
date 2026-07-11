@@ -78,7 +78,7 @@ def unpack_batch(batch):
     return imgs, labels, None
 
 
-def face_meta_tensor(sample: "Sample", img_size: tuple[int, int]) -> torch.Tensor:
+def face_meta_tensor(sample: Sample, img_size: tuple[int, int]) -> torch.Tensor:
     """Face-box fractions + validity flag for the FaceRegionHead: [x1,y1,x2,y2,valid].
 
     ``img_size`` is the (W, H) of the image actually opened for this sample (the

@@ -1,0 +1,38 @@
+# configs/data_attention_v1.yaml
+# DINOv2 reg4 ViT-B/14 + attention-pool head, on the now-DEFAULT analog-double data pipeline.
+#
+# Data (baked into build_loaders, no flag): train AND val = {all images, clean} ∪
+# {is_digital images, recapture}. Each digital doc is seen as-is AND print-and-recaptured
+# (label preserved). The val analog copies are seeded per-sample so val AuDET is a stable,
+# harder-than-clean checkpoint metric (no separate probe). Split = label×type stratified
+# (every doc type represented in val).
+#
+# Keeps: attention-pool head, AUC ranking loss, multi-scale TTA, LLRD + warmup + AMP.
+
+name: data_attention_v1
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20                 # analog-double ~doubles the samples/epoch — reduce if too slow
+batch_size: 32
+lr: 1.0e-4
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1          # label×type stratified split (every doc type represented)
+
+extra:
+  pool: map                # attention-pool head
+  auc_loss_weight: 0.1     # pairwise ranking loss
+  tta: [476, 518, 560]     # multi-scale TTA at inference
+  missing_id_score: 0.5
+
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true

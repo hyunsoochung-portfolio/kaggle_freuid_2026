@@ -17,7 +17,7 @@ import torch
 from PIL import Image
 
 from freuid.config import Config
-from freuid.data import load_labels, lodo_split, stratified_split
+from freuid.data import load_labels, stratified_split
 from freuid.models import build_model
 from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device
@@ -39,9 +39,7 @@ def load_checkpoint(checkpoint_path: Path | str = DEFAULT_CHECKPOINT) -> tuple[C
 
 
 def get_split_ids(cfg: Config) -> tuple[set[str], set[str]]:
-    """Reproduce the exact (train_ids, val_ids) split used during finetune_v0 training."""
-    if cfg.val_doc_type:
-        return lodo_split(cfg.data_dir, cfg.val_doc_type)
+    """Reproduce the exact (train_ids, val_ids) stratified split used during training."""
     return stratified_split(cfg.data_dir, cfg.val_fraction, cfg.seed)
 
 

@@ -41,16 +41,8 @@ extra:
   # Augmentation: print-and-capture pipeline (no flip) -- unchanged from baseline_v1
   augment: recapture
 
-  # Synthetic tamper: 30% of bona-fide per batch become synthetic positives -- unchanged
-  synth_tamper_prob: 0.3
-
   # Pairwise soft-AUC term -- unchanged
   auc_loss_weight: 0.1
-
-  # Recapture probe: the compass -- unchanged
-  use_recapture_probe: true
-  recapture_probe_seed: 1234
-  checkpoint_metric: probe_audet
 
   # Inference: TTA at three scales, multiples of patch_size=14 (476=14x34, 518=14x37,
   # 560=14x40), rank-averaged, no flip. baseline_v1 used `tta: true` (auto [320,384,448]);
@@ -59,13 +51,6 @@ extra:
   tta: [476, 518, 560]
 
   missing_id_score: 0.5
-
-  val_doc_types:
-    - EGYPT/DL
-    - GUINEA/DL
-    - BENIN/DL
-    - MOZAMBIQUE/DL
-    - MAURITIUS/ID
 
   # --- New for this experiment: layer-wise LR decay fine-tuning ---
   # Gated block: absent/false in every other config, so this is fully additive.

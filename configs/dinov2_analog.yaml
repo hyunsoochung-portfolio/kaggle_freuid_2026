@@ -1,0 +1,33 @@
+# configs/dinov2_analog.yaml
+# A/B treatment (analog-double ON). Identical to dinov2_repro.yaml EXCEPT
+# extra.analog_double=true -> the ONLY difference is the analog-double augmentation
+# (train+val doubled with recapture). Still NO AUC loss and NO TTA, so this isolates
+# analog-double's effect on the dinov2_v1 recipe (baseline 0.0686).
+
+name: dinov2_analog
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 6
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: true      # ON: +analog-double. The A/B variable.
+  missing_id_score: 0.5
+  # no auc_loss_weight, no tta -> only analog-double differs from dinov2_repro
+  llrd:
+    enabled: true
+    decay: 0.75
+    warmup_epochs: 1
+  amp: true
