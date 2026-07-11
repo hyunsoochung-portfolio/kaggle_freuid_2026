@@ -127,9 +127,11 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
         # Val: a deterministic synth PROBE (clean bona 0 + tampered twin 1, 50/50) -- a
         # non-saturating checkpoint compass, unlike the in-domain clean val which saturates.
         from freuid.augment import (
+            AnalogDoubleDataset,
             SynthProbeDataset,
             SynthTamperWrapper,
             build_donor_pool,
+            recapture_v2_transforms,
         )
         st = cfg.extra["synth_tamper"]
         train_tf = build_transforms(size, True, mean, std)   # same aug as the plain 0.039 path
@@ -140,18 +142,26 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
         train_ds = SynthTamperWrapper(
             base_train, train_tf, donor_pool,
             prob=float(st.get("prob", 0.3)), text_prob=float(st.get("text_prob", 0.2)),
-            seed=cfg.seed,
+            recapture_prob=float(st.get("recapture_prob", 0.0)), seed=cfg.seed,
         )
-        base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
-        base_val.samples = [s for s in base_val.samples if s.label == 0]   # bona-fide only
-        val_ds = SynthProbeDataset(
-            base_val, clean_tf, donor_pool,
-            text_prob=float(st.get("text_prob", 0.2)), seed=cfg.seed,
-        )
+        if st.get("val_probe", "synth") == "recapture":
+            # recapture probe: val (bona+fraud, stratified) + deterministic analog
+            # copies (labels kept) -> non-saturating compass on the analog axis.
+            make_rc = functools.partial(recapture_v2_transforms, size, mean, std)
+            base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
+            val_ds = AnalogDoubleDataset(base_val, clean_tf, make_rc,
+                                         deterministic_seed=cfg.seed)
+            probe_desc = (f"recapture probe {len(base_val.samples)}+{len(val_ds.analog_idx)}"
+                          f"={len(val_ds)} (clean+analog, labels kept)")
+        else:
+            base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
+            base_val.samples = [s for s in base_val.samples if s.label == 0]   # bona only
+            val_ds = SynthProbeDataset(base_val, clean_tf, donor_pool,
+                                       text_prob=float(st.get("text_prob", 0.2)), seed=cfg.seed)
+            probe_desc = f"synth probe {len(val_ds)} ({len(base_val.samples)} bona x2, 50/50)"
         print(
             f"[train] synth_tamper prob={st.get('prob', 0.3)} "
-            f"text_prob={st.get('text_prob', 0.2)}: train={len(train_ds)} | "
-            f"probe val={len(val_ds)} ({len(base_val.samples)} bona x2, 50/50)"
+            f"recapture_prob={st.get('recapture_prob', 0.0)}: train={len(train_ds)} | {probe_desc}"
         )
     elif cfg.extra.get("analog_double", True):
         # partial (not a local closure) so DataLoader workers can pickle it under 'spawn'

@@ -444,12 +444,14 @@ class SynthTamperWrapper(Dataset, _DonorMixin):
     ``synth_tamper`` before the transform; real frauds and untampered bona-fide
     pass through unchanged. Tamper is fresh-random each epoch (train variety)."""
 
-    def __init__(self, base, transform, donor_pool, prob=0.3, text_prob=0.2, seed=0):
+    def __init__(self, base, transform, donor_pool, prob=0.3, text_prob=0.2,
+                 recapture_prob=0.0, seed=0):
         self.base = base
         self.tf = transform
         self.donor_pool = donor_pool
         self.prob = float(prob)
         self.text_prob = float(text_prob)
+        self.recapture_prob = float(recapture_prob)
         self.seed = int(seed)
         self._donor_cache = {}
 
@@ -461,19 +463,23 @@ class SynthTamperWrapper(Dataset, _DonorMixin):
         src = s.card_path if s.card_path is not None else s.path
         img = Image.open(src).convert("RGB")
         label = s.label
-        if label == 0:
-            rng = random.Random()                      # fresh entropy -> varies per epoch
-            if rng.random() < self.prob:
-                donor = self._donor_bgr(s.type, rng)
-                if donor is not None:
-                    nrng = np.random.default_rng()
-                    bgr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
-                    out, mode = synth_tamper(
-                        bgr, donor, rng, nrng, self.text_prob,
-                        allow_color_on_gray=(s.type == "BENIN/DL"))
-                    if mode != "none":
-                        img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
-                        label = 1
+        rng = random.Random()                          # fresh entropy -> varies per epoch
+        # (a) digital tell: bona-fide -> synthetic fraud
+        if label == 0 and rng.random() < self.prob:
+            donor = self._donor_bgr(s.type, rng)
+            if donor is not None:
+                bgr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+                out, mode = synth_tamper(
+                    bgr, donor, rng, np.random.default_rng(), self.text_prob,
+                    allow_color_on_gray=(s.type == "BENIN/DL"))
+                if mode != "none":
+                    img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+                    label = 1
+        # (b) analog robustness: recapture ANY image (label preserved)
+        if self.recapture_prob > 0 and rng.random() < self.recapture_prob:
+            bgr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+            bgr = _recapture_degrade(bgr, rng, np.random.default_rng())
+            img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         return self.tf(img), label
 
 
