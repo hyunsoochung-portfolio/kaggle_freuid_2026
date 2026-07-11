@@ -18,7 +18,7 @@ backbone: vit_base_patch14_dinov2.lvd142m
 pretrained: true
 image_size: 518
 
-epochs: 25
+epochs: 20
 batch_size: 32
 lr: 5.0e-5
 weight_decay: 5.0e-2
@@ -34,7 +34,8 @@ extra:
   tta: [476, 518, 560]
   missing_id_score: 0.5
   save_last: true
-  early_stop_patience: 3
+  save_every_epoch: true    # keep every epoch's checkpoint (pick what to submit later)
+  early_stop_patience: 0     # OFF -- run the full schedule so LR fully anneals at ep20
   llrd:
     enabled: true
     decay: 0.7

@@ -419,6 +419,16 @@ def main() -> None:
             )
             print(f"  -> saved {last_ckpt} (last, epoch={epoch})")
 
+        # Keep EVERY epoch's weights (checkpoints/{name}_ep{NN}.pt) so the full
+        # epoch-by-epoch trend can be inspected and any epoch submitted later.
+        if cfg.extra.get("save_every_epoch", False):
+            ep_ckpt = Path("checkpoints") / f"{cfg.name}_ep{epoch:02d}.pt"
+            torch.save(
+                {"model": model.state_dict(), "config": vars(cfg), "epoch": epoch, "metrics": m},
+                ep_ckpt,
+            )
+            print(f"  -> saved {ep_ckpt}")
+
         # Early stop on consecutive val_loss rises (checked after saving, so the last
         # checkpoint includes this epoch). val_loss is noisy here, so patience>=3 is advised.
         if es_patience > 0:
