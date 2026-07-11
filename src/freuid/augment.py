@@ -12,6 +12,7 @@ from pathlib import Path
 import albumentations as A
 import cv2
 import numpy as np
+import torch
 from albumentations.pytorch import ToTensorV2
 from PIL import Image, ImageFilter
 from torch.utils.data import Dataset
@@ -515,3 +516,92 @@ class SynthProbeDataset(Dataset, _DonorMixin):
             return self.tf(img), 0
         img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
         return self.tf(img), 1
+
+
+# ---------------------------------------------------------------------------
+# Recapture (digital -> analog) degradation, v2 -- CALIBRATED to the real
+# is_digital=False images (scripts/recapture_calib.py). Matched analog/digital
+# stat ratios: sharpness ~0.16x (dominant ~6x softening), illumination unevenness
+# ~1.33x (smooth lighting gradient + vignette, NOT harsh glare), saturation
+# ~0.90x, brightness ~0.93x, contrast ~0.93x; + mild colour cast (warm OR cool),
+# sensor noise, small perspective/rotation, light JPEG. No moire/halftone -- the
+# real captures are photos of PRINTS, not screens.
+
+def _recapture_degrade(img, rng, nrng):
+    """digital BGR uint8 -> analog-like BGR uint8. Scalars from python ``rng``,
+    array noise from ``nrng`` -- a fixed seed gives a deterministic val probe."""
+    h, w = img.shape[:2]
+    f = img.astype(np.float32)
+    # 1. defocus blur (ALWAYS) -- softening; kept small because the warp + JPEG
+    #    below also soften, and together they must land at ~6x (real) not more.
+    f = cv2.GaussianBlur(f, (0, 0), rng.uniform(0.1, 0.35) * (w / 512.0))
+    # 2. downscale-upscale (resolution loss, compounds softening)
+    s = rng.uniform(0.82, 0.95)
+    f = cv2.resize(cv2.resize(f, (max(8, int(w * s)), max(8, int(h * s))),
+                              interpolation=cv2.INTER_AREA),
+                   (w, h), interpolation=cv2.INTER_CUBIC)
+    # 3. smooth illumination gradient + radial vignette (soft, not glare)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    ang = rng.uniform(0, 6.283)
+    grad = (xx / w - 0.5) * np.cos(ang) + (yy / h - 0.5) * np.sin(ang)
+    r = np.sqrt((xx / w - 0.5) ** 2 + (yy / h - 0.5) ** 2)
+    illum = (1 + rng.uniform(0.38, 0.60) * grad) * \
+            (1 - rng.uniform(0.14, 0.28) * (r / (r.max() + 1e-6)) ** 2)
+    f = f * illum[..., None]
+    # 4. colour cast (warm OR cool, both directions)
+    f = f * np.array([rng.uniform(0.90, 1.09), rng.uniform(0.95, 1.05),
+                      rng.uniform(0.90, 1.09)], np.float32)
+    # 5. mildly darker + lower contrast
+    f = (f - 128) * rng.uniform(0.92, 1.0) + 128
+    f = f * rng.uniform(0.93, 1.0)
+    # 6. desaturate ~10%
+    f = np.clip(f, 0, 255).astype(np.uint8)
+    hsv = cv2.cvtColor(f, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[..., 1] *= rng.uniform(0.80, 0.94)
+    f = cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+    # 7. mild sensor noise
+    f = np.clip(f + nrng.standard_normal((h, w, 1)).astype(np.float32) * rng.uniform(2, 5),
+                0, 255).astype(np.uint8)
+    # 8. small perspective + rotation (photographed at a slight angle)
+    if rng.random() < 0.7:
+        m = rng.uniform(0.008, 0.03)
+        src = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+        dst = src + np.float32([[rng.uniform(-m, m) * w, rng.uniform(-m, m) * h]
+                                for _ in range(4)])
+        f = cv2.warpPerspective(f, cv2.getPerspectiveTransform(src, dst), (w, h),
+                                borderMode=cv2.BORDER_REPLICATE)
+    if rng.random() < 0.6:
+        rot = cv2.getRotationMatrix2D((w / 2, h / 2), rng.uniform(-3, 3), 1.0)
+        f = cv2.warpAffine(f, rot, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    # 9. light JPEG (capture / upload)
+    ok, enc = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, int(rng.uniform(80, 95))])
+    if ok:
+        f = cv2.imdecode(enc, cv2.IMREAD_COLOR)
+    return f
+
+
+class _RecaptureV2Transform:
+    """PIL RGB -> CHW normalized tensor via the calibrated recapture degradation.
+    seed=None -> fresh randomness each call (train variety); an int seed ->
+    deterministic (val probe). Same output contract as the torchvision transforms."""
+
+    def __init__(self, image_size, mean, std, seed=None):
+        self.size = int(image_size)
+        self.mean = np.array(mean, np.float32)
+        self.std = np.array(std, np.float32)
+        self.rng = random.Random(seed)
+        self.nrng = np.random.default_rng(seed if seed is not None else None)
+
+    def __call__(self, img):
+        bgr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+        bgr = cv2.resize(bgr, (self.size, self.size))
+        bgr = _recapture_degrade(bgr, self.rng, self.nrng)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        rgb = (rgb - self.mean) / self.std
+        return torch.from_numpy(rgb.transpose(2, 0, 1)).contiguous().float()
+
+
+def recapture_v2_transforms(image_size, mean, std, seed=None):
+    """Factory mirroring recapture_transforms' signature, for the calibrated
+    recapture. Selected by build_loaders when extra.recapture_version == 'v2'."""
+    return _RecaptureV2Transform(image_size, mean, std, seed)
