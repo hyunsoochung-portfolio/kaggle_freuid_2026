@@ -22,7 +22,7 @@ epochs: 25
 batch_size: 32
 lr: 5.0e-5
 weight_decay: 5.0e-2
-num_workers: 24
+num_workers: 32
 
 val_fraction: 0.1
 

@@ -475,9 +475,17 @@ class SynthTamperWrapper(Dataset, _DonorMixin):
                 if mode != "none":
                     img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
                     label = 1
-        # (b) analog robustness: recapture ANY image (label preserved)
+        # (b) analog robustness: recapture ANY image (label preserved). Cap the
+        # working size first -- recapture at native ~1.4k px is ~1s/img (meshgrid
+        # + warp + JPEG), and the transform downsizes to the model res anyway, so
+        # this keeps it ~7x cheaper without changing the look.
         if self.recapture_prob > 0 and rng.random() < self.recapture_prob:
             bgr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+            m = max(bgr.shape[:2])
+            if m > 640:
+                sc = 640 / m
+                bgr = cv2.resize(bgr, (int(bgr.shape[1] * sc), int(bgr.shape[0] * sc)),
+                                 interpolation=cv2.INTER_AREA)
             bgr = _recapture_degrade(bgr, rng, np.random.default_rng())
             img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         return self.tf(img), label
