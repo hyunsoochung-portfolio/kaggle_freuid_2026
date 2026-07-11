@@ -434,6 +434,10 @@ class _DonorMixin:
         img = self._donor_cache.get(p)
         if img is None:
             img = cv2.imread(str(p))
+            if img is not None and max(img.shape[:2]) > 640:   # cache small -> fast detect
+                sc = 640 / max(img.shape[:2])
+                img = cv2.resize(img, (int(img.shape[1] * sc), int(img.shape[0] * sc)),
+                                 interpolation=cv2.INTER_AREA)
             self._donor_cache[p] = img
         return img
 
@@ -462,6 +466,11 @@ class SynthTamperWrapper(Dataset, _DonorMixin):
         s = self.base.samples[idx]
         src = s.card_path if s.card_path is not None else s.path
         img = Image.open(src).convert("RGB")
+        # work at reduced resolution: face-detect + recapture at native ~1.5k px
+        # cost ~1-2 s/img; the final transform resizes to the model res anyway.
+        if max(img.size) > 640:
+            r = 640 / max(img.size)
+            img = img.resize((round(img.width * r), round(img.height * r)), Image.BILINEAR)
         label = s.label
         rng = random.Random()                          # fresh entropy -> varies per epoch
         # (a) digital tell: bona-fide -> synthetic fraud
