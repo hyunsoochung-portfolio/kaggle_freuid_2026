@@ -6,6 +6,11 @@ identity-document fraud detection; **label 1 = fraud, 0 = bona-fide**; output a 
 **fraud score = P(fraud)**; metric **AuDET**, lower is better). For the competition brief see
 [competition.md](competition.md); for setup + data download see the [README](../README.md).
 
+**Erratum**: the real leaderboard score is the organizers' combined FREUID score (AuDET and
+APCER@1%BPCER combined via a DET-F1 harmonic mean), not raw AuDET — "public LB" mentions below
+predate this correction. See `scripts/analysis/official_score_reconciliation_out/
+official_score_reconciliation_report.md` and `CLAUDE.md`'s Project section.
+
 The repo currently ships one experiment, **`finetune_v0`**: a DINOv2 ViT-B/14 backbone,
 **fully fine-tuned** (not frozen) at 518px, trained through the `model_type: baseline` code
 path. Everything below uses it as the running example — copy `configs/finetune_v0.yaml` as
@@ -191,10 +196,18 @@ document semantics. Recapture augmentation and synthetic tampering must stay
 **label-independent** — never let "looks recaptured" correlate with the fraud label.
 
 ### Touch the metric? Read the caveat first
-`audet()` is a **linear-axis proxy (`1 − ROC AUC`)**, not necessarily byte-identical to the
-official Kaggle scorer. Use it for **relative ranking** of candidates. If/when the official
-scorer's exact definition (e.g. probit-axis DET integration) is confirmed, update
-[metrics.py](../src/freuid/metrics.py) and re-rank. Keep `tests/test_metrics.py` green.
+**Resolved**: the official Kaggle scorer is now vendored verbatim at
+[`src/freuid/official_score.py`](../src/freuid/official_score.py) (provenance header has the
+source URL/date). `audet()` and `apcer_at_bpcer()` in [metrics.py](../src/freuid/metrics.py) have
+been checked against it directly (random data, including tied scores) and agree to float
+precision — they are not an approximation. What they don't give you on their own is the
+organizers' COMBINED leaderboard score (`FREUID = 1 - HM(1-AuDET, 1-APCER@1%BPCER)`) — use
+`evaluate()`, which returns `"freuid"` alongside `"audet"`/`"apcer_at_1pct_bpcer"` via the
+vendored scorer. See `scripts/analysis/official_score_reconciliation_out/
+official_score_reconciliation_report.md` for why AuDET alone can be a misleading ranking signal,
+and `scripts/analysis/diff_gate.py` for a reusable pre-submission gate built on this. Don't
+hand-roll the harmonic-mean combination elsewhere — one source of truth. Keep
+`tests/test_metrics.py` and `tests/test_official_score.py` green.
 
 ---
 

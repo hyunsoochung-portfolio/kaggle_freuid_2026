@@ -5,6 +5,12 @@ the-freuid-challenge-2026-ijcai-ecai --download`. 228 teams total. Lower score i
 (AuDET). Our team, **hyunsooochung**, sits at **rank 37 / 228** with `0.00744` — this is
 `finetune_v0`'s score; `bayar_dinov2_v1` has not been submitted yet (daily quota).
 
+**Erratum (2026-07-11)**: the leaderboard score above is the organizers' combined FREUID score
+(AuDET + APCER@1%BPCER via a DET-F1 harmonic mean), not raw AuDET as stated — see
+`scripts/analysis/official_score_reconciliation_out/official_score_reconciliation_report.md`.
+Also, `bayar_dinov2_v1` has since been submitted: observed public LB **0.18927** (~25x worse
+than `finetune_v0`) — this snapshot predates that submission.
+
 ## Top 15
 
 | Rank | Team | Score | Submissions | Last submission |

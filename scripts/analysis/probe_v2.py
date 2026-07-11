@@ -176,11 +176,13 @@ def main() -> None:
         n_fraud, n_bona = int((labels == 1).sum()), int((labels == 0).sum())
         print(f"[probe_v2] {name} (model_type={model_type}, n={len(labels)}, "
               f"{n_fraud} fraud / {n_bona} bona-fide, {elapsed:.0f}s): "
-              f"probe_v2_AuDET={m['audet']:.6f} probe_v2_APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.6f}")
+              f"probe_v2_AuDET={m['audet']:.6f} probe_v2_APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.6f} "
+              f"probe_v2_FREUID={m['freuid']:.6f}")
         results_rows.append({
             "checkpoint": name, "model_type": model_type, "n": len(labels),
             "n_fraud": n_fraud, "n_bona_fide": n_bona,
             "probe_v2_audet": m["audet"], "probe_v2_apcer_at_1pct_bpcer": m["apcer_at_1pct_bpcer"],
+            "probe_v2_freuid": m["freuid"],
             "seconds": elapsed,
         })
         del model

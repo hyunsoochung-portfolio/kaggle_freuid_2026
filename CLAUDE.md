@@ -5,10 +5,24 @@ Context for building this project. Read before writing code.
 ## Project
 
 FREUID Challenge 2026 — binary fraud detection on identity-document images. Output a continuous
-fraud score `P(fraud) ∈ [0,1]` (never a hard label); `1 = fraud`, `0 = bona-fide`. Primary metric
-**AuDET** (area under the DET curve; repo proxy `1 - roc_auc_score`, **lower is better**);
-secondary **APCER @ 1% BPCER**. Both are rank metrics — only score _ordering_ matters, not
-calibration.
+fraud score `P(fraud) ∈ [0,1]` (never a hard label); `1 = fraud`, `0 = bona-fide`.
+
+**The public/private leaderboard score is NOT raw AuDET.** It's the organizers' combined
+**FREUID score**, a DET-F1 harmonic-mean combination of two sub-metrics — **AuDET** (area under
+the DET curve; repo proxy `1 - roc_auc_score`) and **APCER @ 1% BPCER** (attack pass-rate at a
+1%-bona-fide-rejection budget) — via `FREUID = 1 - HM(1-AuDET, 1-APCER@1%BPCER)`, both
+lower-is-better, bounded `[0,1]`. The organizers' official scorer is vendored verbatim at
+`src/freuid/official_score.py` (provenance header has the source URL/date) —
+`official_freuid_score(y_true, y_score)` returns all three values. **Every "public LB 0.00744"
+(etc.) statement predating `scripts/analysis/official_score_reconciliation_out/
+official_score_reconciliation_report.md` calls this number "AuDET"; it wasn't AuDET, it was
+already the combined FREUID score** — the terminology (not the numbers) was wrong throughout.
+Because harmonic-mean punishes the *worse* of the two components, a model can have excellent
+AuDET and still get a bad combined score if its APCER@1%BPCER tail is weak — the two are not
+interchangeable, and optimizing/reporting on AuDET alone is not the same target as the real
+leaderboard. Both sub-metrics are rank/threshold-sweep metrics — only score _ordering_ matters,
+not calibration — but the combination step (harmonic mean) is not itself rank-invariant across
+the two components, so treat "lower combined score" (not "lower AuDET") as the real goal.
 
 The real test is hard on purpose: **print-and-capture ("analog hole") attacks**, **GenAI
 multimodal edits**, and **document types not seen in training**, while the training data is
@@ -26,7 +40,9 @@ warmup), AMP, `BCEWithLogitsLoss` + a pairwise soft-AUC term, print-and-capture 
 augmentation + synthetic tamper injection (30% of bona-fide per batch), checkpointed on the
 lowest recapture-probe AuDET. Result: **probe_AuDET 0.000002, public LB 0.00744** (rank 33/212
 at submission time) — the strongest result so far, and the config every later experiment is
-compared against.
+compared against. *(Erratum: "public LB 0.00744" is the combined FREUID score, not raw AuDET —
+see this file's Project section and `scripts/analysis/official_score_reconciliation_out/
+official_score_reconciliation_report.md`. `probe_AuDET` genuinely is raw AuDET, unaffected.)*
 
 Why fine-tune the whole backbone instead of freezing it and training a light head on top:
 freezing throws away every layer's ability to adapt to what actually survives print-and-capture

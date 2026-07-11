@@ -33,7 +33,10 @@ from freuid.transforms import build_transforms, resolve_data_config
 from freuid.utils import pick_device, seed_everything
 
 
-def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: float = 0.0, scaler=None):
+def run_epoch(
+    model, loader, device, criterion, optimizer=None, auc_weight: float = 0.0, scaler=None,
+    pair_hinge_weight: float = 0.0, pair_margin: float = 1.0,
+):
     """One pass. With an optimizer it trains; without, it evaluates.
 
     Returns (mean_loss, scores, labels) where scores = P(fraud). In train mode the
@@ -47,14 +50,30 @@ def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: floa
     when non-None and ``scaler.is_enabled()``; omitting it (the default for every
     existing config) reproduces the original FP32 path exactly -- a disabled GradScaler
     is a documented no-op passthrough for scale/step/update.
+
+    ``pair_hinge_weight`` > 0 (photosub_v0 only, train only) switches the batch-unpacking to
+    freuid.photosub.mixing.unpack_photosub_batch (imgs, labels, pair_ids) instead of the usual
+    unpack_and_move, and adds freuid.loss.pair_hinge_loss to the loss. 0.0 (every other config)
+    is bit-for-bit identical to the original path -- face_meta/face_crop are never combined
+    with photosub mixing (model_type=baseline only), so this is a clean either/or, not a merge
+    of the two unpacking conventions. Returns a 3rd loop-level value, ``n_pairs_found``
+    (summed over batches, train mode only) -- purely for the smoke-run "twin pairs verified by
+    assertion" log line; 0 whenever pair_hinge_weight == 0.0.
     """
     is_train = optimizer is not None
     model.train(is_train)
     total_loss, n_seen, all_scores, all_labels = 0.0, 0, [], []
+    n_pairs_found = 0
     use_amp = scaler is not None and scaler.is_enabled()
+    use_pairs = pair_hinge_weight > 0.0 and is_train
     for batch in tqdm(loader, leave=False):
-        imgs, labels, face_meta_dev, face_crop_dev = unpack_and_move(batch, device)
-        labels_dev = labels.to(device)
+        if use_pairs:
+            from freuid.photosub.mixing import unpack_photosub_batch
+            imgs, labels_dev, pair_ids_dev = unpack_photosub_batch(batch, device)
+            face_meta_dev = face_crop_dev = None
+        else:
+            imgs, labels, face_meta_dev, face_crop_dev = unpack_and_move(batch, device)
+            labels_dev = labels.to(device)
         # eval 모드에서는 불필요한 그래디언트 계산을 끄는 컨텍스트 매니저
         with torch.set_grad_enabled(is_train):
             amp_ctx = (
@@ -67,6 +86,13 @@ def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: floa
                 # BCE + optional pairwise AUC term (train only; val always uses plain BCE)
                 _aw = auc_weight if is_train else 0.0
                 loss = combined_loss(logits, labels_dev, criterion, _aw)
+                if use_pairs:
+                    from freuid.loss import pair_hinge_loss
+                    from freuid.photosub.mixing import count_pairs_in_batch
+                    loss = loss + pair_hinge_weight * pair_hinge_loss(
+                        logits, labels_dev, pair_ids_dev, margin=pair_margin
+                    )
+                    n_pairs_found += count_pairs_in_batch(labels_dev, pair_ids_dev)
             if is_train:
                 optimizer.zero_grad()
                 if use_amp:
@@ -88,8 +114,8 @@ def run_epoch(model, loader, device, criterion, optimizer=None, auc_weight: floa
             all_labels.append(labels_dev.cpu())
     mean_loss = total_loss / max(n_seen, 1)
     if is_train:
-        return mean_loss, None, None
-    return mean_loss, torch.cat(all_scores).numpy(), torch.cat(all_labels).numpy()
+        return mean_loss, None, None, n_pairs_found
+    return mean_loss, torch.cat(all_scores).numpy(), torch.cat(all_labels).numpy(), 0
 
 
 def _split_ids(cfg: Config) -> tuple[set[str], set[str]]:
@@ -194,10 +220,55 @@ def build_loaders(
         **_ds_face_kwargs,
     )
     pin_memory = torch.cuda.is_available()  # unsupported/no-op on MPS, only helps CUDA
-    train_loader = DataLoader(
-        train_ds, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=cfg.num_workers, pin_memory=pin_memory, drop_last=True,
-    )
+
+    # Photosub mixing (photosub_v0): adds offline-generated photo-substitution rows to the
+    # train split + twin-pair batching. Gated on extra.photosub.enabled so every other config
+    # is completely unaffected. model_type=baseline only (photosub_v0 doesn't combine with the
+    # consistency/bayar_fusion face_meta/face_crop paths).
+    photosub_cfg = cfg.extra.get("photosub", {}) or {}
+    if photosub_cfg.get("enabled", False):
+        if model_type != "baseline":
+            raise ValueError("photosub mixing only supports model_type=baseline")
+        from freuid.photosub.mixing import (
+            PhotosubTwinDataset,
+            TwinPairBatchSampler,
+            load_photosub_rows,
+            select_mixed_rows,
+        )
+        from freuid.photosub.pipeline import photosub_generated_dir
+
+        rows_csv = Path(photosub_cfg.get("rows_csv", photosub_generated_dir(cfg.data_dir) / "rows.csv"))
+        rows_df = load_photosub_rows(rows_csv)
+        base_samples = train_ds.samples if hasattr(train_ds, "samples") else train_ds.base.samples
+        base_n_positive = sum(1 for s in base_samples if s.label == 1)
+        mode_weights = photosub_cfg.get("mode_weights", {"A": 0.44, "B": 0.33, "C": 0.22, "D": 0.0})
+        share = float(photosub_cfg.get("share", 0.15))
+        selected = select_mixed_rows(rows_df, train_ids, mode_weights, share, base_n_positive, seed=cfg.seed)
+        if selected.empty:
+            print(
+                f"[train] WARNING: photosub.enabled=True but 0 rows selected from {rows_csv} "
+                f"({len(rows_df)} rows total in file) -- check rows_csv / share / mode_weights"
+            )
+        else:
+            mode_counts = selected["mode"].value_counts().to_dict()
+            print(
+                f"[train] photosub mixing: base_n_positive={base_n_positive} share={share} -> "
+                f"{len(selected)} rows selected {mode_counts} from {rows_csv}"
+            )
+        twin_ds = PhotosubTwinDataset(train_ds, selected, train_tf)
+        twin_pair_prob = float(photosub_cfg.get("twin_pair_prob", 0.5))
+        batch_sampler = TwinPairBatchSampler(
+            twin_ds, batch_size=cfg.batch_size, twin_pair_prob=twin_pair_prob, seed=cfg.seed,
+        )
+        print(f"[train] photosub twin_pair_prob={twin_pair_prob} (n_base={twin_ds.n_base}, n_photosub={len(selected)})")
+        train_loader = DataLoader(
+            twin_ds, batch_sampler=batch_sampler, num_workers=cfg.num_workers, pin_memory=pin_memory,
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds, batch_size=cfg.batch_size, shuffle=True,
+            num_workers=cfg.num_workers, pin_memory=pin_memory, drop_last=True,
+        )
     val_loader = DataLoader(
         val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers,
     )
@@ -241,20 +312,30 @@ def _run_probe(model, probe_loader, device, criterion, seed: int, scaler=None) -
     import numpy as np
     random.seed(seed)
     np.random.seed(seed)
-    _, scores, labels = run_epoch(model, probe_loader, device, criterion, scaler=scaler)
+    _, scores, labels, _ = run_epoch(model, probe_loader, device, criterion, scaler=scaler)
     return evaluate(scores, labels)
 
 
-def _check_init_loss(model, loader, device, criterion, tol: float = 0.3) -> None:
+def _check_init_loss(model, loader, device, criterion, tol: float = 0.3, photosub_batches: bool = False) -> None:
     """Assert that BCE on the first train batch ≈ ln(2) before any weight update.
 
     A fresh classifier head (bias=0, small weights) outputs logits ≈ 0, so
     sigmoid → 0.5 and BCE → ln(2) ≈ 0.693 on any class mix. Failing this usually
     means labels are on the wrong scale, the head bias was initialised incorrectly,
     or the loss function is mis-wired.
+
+    ``photosub_batches=True`` unpacks via freuid.photosub.mixing.unpack_photosub_batch
+    (imgs, labels, pair_ids) instead of unpack_and_move -- the pair_id 3rd element must never
+    be handed to forward_with_extras as a face_meta tensor (model_type=baseline has no 2nd
+    forward arg at all).
     """
     model.eval()
-    imgs, labels, face_meta, face_crop = unpack_and_move(next(iter(loader)), device)
+    if photosub_batches:
+        from freuid.photosub.mixing import unpack_photosub_batch
+        imgs, labels, _ = unpack_photosub_batch(next(iter(loader)), device)
+        face_meta = face_crop = None
+    else:
+        imgs, labels, face_meta, face_crop = unpack_and_move(next(iter(loader)), device)
     with torch.no_grad():
         logits = forward_with_extras(model, imgs, face_meta, face_crop)
         loss = criterion(logits, labels.float().unsqueeze(1).to(device)).item()
@@ -268,15 +349,25 @@ def _check_init_loss(model, loader, device, criterion, tol: float = 0.3) -> None
     print(f"[sanity] init BCE={loss:.4f} ~= ln2={expected:.4f} (tol={tol}) OK")
 
 
-def _sanity_overfit(model, loader, device, criterion, steps: int = 100, target: float = 0.02) -> None:
+def _sanity_overfit(
+    model, loader, device, criterion, steps: int = 100, target: float = 0.02,
+    photosub_batches: bool = False,
+) -> None:
     """Overfit a single batch to near-zero loss; asserts the forward+backward path works.
 
     Runs on a COPY of the model so the real training weights are untouched.
     Uses SGD (no momentum) so convergence is purely the model's capacity.
+
+    See ``_check_init_loss`` for what ``photosub_batches`` changes.
     """
     import copy
     m = copy.deepcopy(model)
-    imgs, labels, face_meta, face_crop = unpack_and_move(next(iter(loader)), device)
+    if photosub_batches:
+        from freuid.photosub.mixing import unpack_photosub_batch
+        imgs, labels, _ = unpack_photosub_batch(next(iter(loader)), device)
+        face_meta = face_crop = None
+    else:
+        imgs, labels, face_meta, face_crop = unpack_and_move(next(iter(loader)), device)
     targets = labels.float().unsqueeze(1).to(device)
     opt = torch.optim.SGD(m.parameters(), lr=0.1)
     m.train()
@@ -321,6 +412,7 @@ def main() -> None:
     )
 
     train_loader, val_loader, probe_loader = build_loaders(cfg, data_cfg)
+    photosub_enabled = bool((cfg.extra.get("photosub") or {}).get("enabled", False))
     print(f"[train] train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
     if probe_loader is not None:
         print(f"[train] probe={len(probe_loader.dataset)} (recapture, seed={cfg.extra.get('recapture_probe_seed', 0)})")
@@ -355,10 +447,10 @@ def main() -> None:
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # Always check init loss before any weight updates.
-    _check_init_loss(model, train_loader, device, criterion)
+    _check_init_loss(model, train_loader, device, criterion, photosub_batches=photosub_enabled)
 
     if args.sanity:
-        _sanity_overfit(model, train_loader, device, criterion)
+        _sanity_overfit(model, train_loader, device, criterion, photosub_batches=photosub_enabled)
         print("[sanity] all checks passed — exiting")
         return
 
@@ -392,6 +484,19 @@ def main() -> None:
     if auc_weight > 0.0:
         print(f"[train] auc_loss_weight={auc_weight} (pairwise soft-AUC term active)")
 
+    # Photosub twin-pair hinge (photosub_v0 only) -- see build_loaders' photosub_cfg block and
+    # freuid.loss.pair_hinge_loss. 0.0 (every other config, or photosub.enabled=False) is
+    # bit-for-bit identical to the pre-photosub run_epoch path.
+    photosub_cfg = cfg.extra.get("photosub", {}) or {}
+    pair_hinge_weight = float(photosub_cfg.get("pair_hinge_weight", 0.0)) if photosub_cfg.get("enabled", False) else 0.0
+    pair_margin = float(photosub_cfg.get("pair_margin", 1.0))
+    if pair_hinge_weight > 0.0:
+        print(f"[train] photosub pair_hinge_weight={pair_hinge_weight} margin={pair_margin}")
+    run_photosub_probes = photosub_cfg.get("enabled", False) and photosub_cfg.get("probe_hooks", True)
+    if run_photosub_probes:
+        from freuid.photosub.probes import run_probe_hooks
+        probe_hook_tf = build_transforms(data_cfg["image_size"], False, data_cfg["mean"], data_cfg["std"])
+
     # AMP: disabled GradScaler is a documented no-op passthrough, so this is safe to
     # always construct and thread through run_epoch -- every config without
     # extra.amp=True gets scaler.is_enabled()==False and reproduces the exact FP32 path.
@@ -411,8 +516,13 @@ def main() -> None:
     best_metric = float("inf")
     best_tiebreak = float("inf")
     for epoch in range(1, cfg.epochs + 1):
-        train_loss, *_ = run_epoch(model, train_loader, device, criterion, optimizer, auc_weight, scaler=scaler)
-        val_loss, val_scores, val_labels = run_epoch(model, val_loader, device, criterion, scaler=scaler)
+        train_loss, _, _, n_pairs_found = run_epoch(
+            model, train_loader, device, criterion, optimizer, auc_weight, scaler=scaler,
+            pair_hinge_weight=pair_hinge_weight, pair_margin=pair_margin,
+        )
+        if pair_hinge_weight > 0.0:
+            print(f"  [photosub] twin pairs found this epoch: {n_pairs_found}")
+        val_loss, val_scores, val_labels, _ = run_epoch(model, val_loader, device, criterion, scaler=scaler)
         m = evaluate(val_scores, val_labels)
         last_lrs = scheduler.get_last_lr()
         lr = last_lrs[0] if len(last_lrs) == 1 else max(last_lrs)
@@ -423,12 +533,43 @@ def main() -> None:
             pm = _run_probe(model, probe_loader, device, criterion, probe_seed, scaler=scaler)
             m["probe_audet"] = pm["audet"]
             m["probe_apcer_at_1pct_bpcer"] = pm["apcer_at_1pct_bpcer"]
-            probe_str = f" probe_AuDET={m['probe_audet']:.6f}"
+            m["probe_freuid"] = pm["freuid"]
+            probe_str = f" probe_AuDET={m['probe_audet']:.6f} probe_FREUID={m['probe_freuid']:.6f}"
+
+        if run_photosub_probes:
+            probe_metrics = run_probe_hooks(model, cfg.data_dir, probe_hook_tf, device, val_scores, val_labels)
+            for d in probe_metrics["probe_deep_detail"]:
+                print(f"  [probe_deep] {d['id']} logit={d['logit']:.4f} score={d['score']:.4f} pct_rank={d['pct_rank']:.2f}")
+            print(
+                "  [probe] deep(9): mean_logit={:.4f} mean_pct_rank={:.2f} | "
+                "boundary(59): mean_logit={:.4f} mean_pct_rank={:.2f} | "
+                "clean_floor(295): mean_logit={:.4f} | ceiling(200): mean_logit={:.4f}".format(
+                    probe_metrics["probe_deep_mean_logit"], probe_metrics["probe_deep_mean_pct_rank"],
+                    probe_metrics["probe_boundary_mean_logit"], probe_metrics["probe_boundary_mean_pct_rank"],
+                    probe_metrics["probe_clean_floor_mean_logit"], probe_metrics["probe_ceiling_mean_logit"],
+                )
+            )
+            print(
+                "  [probe_threshold] score={:.4f} rank={}/{} (n_bonafide={}) | "
+                "boundary missed: {}/{} below threshold | ceiling exposure: {}/{} above threshold".format(
+                    probe_metrics["probe_threshold_score"], probe_metrics["probe_threshold_rank"],
+                    val_scores.shape[0], probe_metrics["probe_n_val_bonafide"],
+                    probe_metrics["probe_boundary_below_threshold"], probe_metrics["probe_boundary_total"],
+                    probe_metrics["probe_ceiling_above_threshold"], probe_metrics["probe_ceiling_total"],
+                )
+            )
+            ceiling_by_template = probe_metrics["probe_ceiling_by_template"]
+            if ceiling_by_template is not None:
+                template_str = ", ".join(
+                    f"{r.template}={int(r.n_above)}/{int(r.n_total)}"
+                    for r in ceiling_by_template.itertuples()
+                )
+                print(f"  [probe_threshold] ceiling budget exposure by template: {template_str}")
 
         lr_str = f"lr={lr:.2e}" if len(last_lrs) == 1 else f"lr_head={lr:.2e} lr_min={min(last_lrs):.2e}"
         print(
             f"\n[epoch {epoch:>2}/{cfg.epochs}] {lr_str} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-            f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f}{probe_str}"
+            f"AuDET={m['audet']:.4f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.4f} FREUID={m['freuid']:.4f}{probe_str}"
         )
 
         current = m.get(ckpt_key, m["audet"])

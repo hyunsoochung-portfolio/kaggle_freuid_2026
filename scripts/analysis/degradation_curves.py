@@ -119,13 +119,14 @@ def _load_existing(out_dir: Path) -> pd.DataFrame:
     path = out_dir / RESULT_CSV_NAME
     if path.exists():
         return pd.read_csv(path)
-    return pd.DataFrame(columns=["corruption", "audet", "apcer_at_1pct_bpcer"])
+    return pd.DataFrame(columns=["corruption", "audet", "apcer_at_1pct_bpcer", "freuid"])
 
 
-def _upsert(out_dir: Path, name: str, audet: float, apcer: float) -> pd.DataFrame:
+def _upsert(out_dir: Path, name: str, audet: float, apcer: float, freuid: float) -> pd.DataFrame:
     df = _load_existing(out_dir)
     df = df[df["corruption"] != name]
-    df = pd.concat([df, pd.DataFrame([{"corruption": name, "audet": audet, "apcer_at_1pct_bpcer": apcer}])],
+    df = pd.concat([df, pd.DataFrame([{"corruption": name, "audet": audet,
+                                        "apcer_at_1pct_bpcer": apcer, "freuid": freuid}])],
                     ignore_index=True)
     df.to_csv(out_dir / RESULT_CSV_NAME, index=False)
     return df
@@ -216,9 +217,9 @@ def main() -> None:
         corrupted = [fn(im) for im in raw_images]
         scores = score_images(model, corrupted, transform, device, batch_size=32)
         m = evaluate(scores, labels)
-        _upsert(out_dir, name, m["audet"], m["apcer_at_1pct_bpcer"])
+        _upsert(out_dir, name, m["audet"], m["apcer_at_1pct_bpcer"], m["freuid"])
         print(f"[degradation] {name:28s} AuDET={m['audet']:.6f} APCER@1%BPCER={m['apcer_at_1pct_bpcer']:.6f} "
-              f"-- checkpointed to {RESULT_CSV_NAME}")
+              f"FREUID={m['freuid']:.6f} -- checkpointed to {RESULT_CSV_NAME}")
 
     make_plot(_load_existing(out_dir), out_dir)
     (out_dir / "degradation_curves_note.md").write_text(CARD_ONLY_NOTE + "\n", encoding="utf-8")

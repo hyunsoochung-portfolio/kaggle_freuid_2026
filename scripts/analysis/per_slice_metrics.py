@@ -63,12 +63,12 @@ def _slice_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
         labels = group["label"].to_numpy()
         if len(set(labels)) < 2:
             rows.append({group_col: key, "n": len(group), "n_fraud": int(labels.sum()),
-                         "audet": float("nan"), "apcer_at_1pct_bpcer": float("nan"),
-                         "note": "single-class slice, AuDET undefined"})
+                         "audet": float("nan"), "apcer_at_1pct_bpcer": float("nan"), "freuid": float("nan"),
+                         "note": "single-class slice, AuDET/APCER/FREUID undefined"})
             continue
         m = evaluate(group["score"].to_numpy(), labels)
         rows.append({group_col: key, "n": len(group), "n_fraud": int(labels.sum()),
-                     "audet": m["audet"], "apcer_at_1pct_bpcer": m["apcer_at_1pct_bpcer"],
+                     "audet": m["audet"], "apcer_at_1pct_bpcer": m["apcer_at_1pct_bpcer"], "freuid": m["freuid"],
                      "note": ""})
     return pd.DataFrame(rows).sort_values("n", ascending=False)
 
@@ -112,7 +112,8 @@ def main() -> None:
         "# Per-slice metrics -- finetune_v0\n",
         f"Val set: n={len(df)}, fraud_rate={df['label'].mean():.4f} "
         f"(plain eval transform, image_size={data_cfg['image_size']}, no TTA, no recapture degradation)\n",
-        f"**Overall**: AuDET={overall['audet']:.6f}  APCER@1%BPCER={overall['apcer_at_1pct_bpcer']:.6f}\n",
+        f"**Overall**: AuDET={overall['audet']:.6f}  APCER@1%BPCER={overall['apcer_at_1pct_bpcer']:.6f}  "
+        f"FREUID={overall['freuid']:.6f}\n",
         f"> **Val circularity**: {VAL_CIRCULARITY_NOTE}\n",
         f"> **Attack-type slicing**: {ATTACK_TYPE_NOTE}\n",
         "## By document type\n",
@@ -124,7 +125,8 @@ def main() -> None:
     summary_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"[per_slice] wrote {out_dir / 'per_slice_scores.csv'}, per_slice_by_type.csv, "
           f"per_slice_by_is_digital.csv, per_slice_summary.md")
-    print(f"[per_slice] overall AuDET={overall['audet']:.6f} APCER@1%BPCER={overall['apcer_at_1pct_bpcer']:.6f}")
+    print(f"[per_slice] overall AuDET={overall['audet']:.6f} APCER@1%BPCER={overall['apcer_at_1pct_bpcer']:.6f} "
+          f"FREUID={overall['freuid']:.6f}")
 
 
 if __name__ == "__main__":

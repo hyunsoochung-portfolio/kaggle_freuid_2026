@@ -52,15 +52,26 @@ realistic threat surface that mixes three attack vectors. Three open research pr
 
 ## 5. Evaluation
 
-- **Primary — AuDET:** area under the Detection Error Trade-off (DET) curve; one scalar capturing the
+**Erratum**: the two bullets below describe AuDET and APCER@1%BPCER as if they were separately
+tracked, with AuDET "primary." The organizers' actual scorer (vendored verbatim at
+`src/freuid/official_score.py`, confirmed against its own docstring examples) combines both into
+a single **FREUID score** via a DET-F1 harmonic mean — `FREUID = 1 - HM(1-AuDET, 1-APCER@1%BPCER)`
+— and THAT combined score, not raw AuDET, is what the public/private leaderboard reports. See
+`scripts/analysis/official_score_reconciliation_out/official_score_reconciliation_report.md`.
+
+- **AuDET:** area under the Detection Error Trade-off (DET) curve; one scalar capturing the
   false-accept ↔ false-reject trade-off across operating points. **Lower is better.**
-- **Operating point — APCER @ 1% BPCER:** attack pass-rate when bona-fide rejection (BPCER) is fixed at 1%
+- **APCER @ 1% BPCER:** attack pass-rate when bona-fide rejection (BPCER) is fixed at 1%
   — the production-relevant slice of the DET curve.
 - Terms: **APCER** = Attack Presentation Classification Error Rate (fraud accepted as genuine);
   **BPCER** = Bona-Fide Presentation Classification Error Rate (genuine rejected as fraud).
 - Leaderboards: **public** (validation subset, updates every submission) and **private** (held-out test, final).
+- **Combined score**: `FREUID = 1 - HM(1-AuDET, 1-APCER@1%BPCER)`, lower is better, bounded `[0,1]`
+  — this is the actual number reported on both leaderboards.
 
-Both metrics are implemented locally in `src/freuid/metrics.py` so we can rank candidates before spending submissions.
+Both sub-metrics are implemented locally in `src/freuid/metrics.py` (a local proxy for ranking
+candidates before spending submissions); the real combined scorer is vendored verbatim in
+`src/freuid/official_score.py`.
 
 ## 6. Timeline (23:59 AoE, UTC-12)
 

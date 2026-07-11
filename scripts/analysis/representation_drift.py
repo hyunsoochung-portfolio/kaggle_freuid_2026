@@ -216,11 +216,13 @@ def main() -> None:
         rows.append({
             "block": b,
             "pretrained_audet": m_pre["audet"], "pretrained_apcer": m_pre["apcer_at_1pct_bpcer"],
+            "pretrained_freuid": m_pre["freuid"],
             "finetuned_audet": m_ft["audet"], "finetuned_apcer": m_ft["apcer_at_1pct_bpcer"],
+            "finetuned_freuid": m_ft["freuid"],
             "cka_pretrained_vs_finetuned": cka,
         })
-        print(f"[drift] block {b:2d}  pretrained AuDET={m_pre['audet']:.4f}  "
-              f"finetuned AuDET={m_ft['audet']:.4f}  CKA={cka:.4f}")
+        print(f"[drift] block {b:2d}  pretrained AuDET={m_pre['audet']:.4f} FREUID={m_pre['freuid']:.4f}  "
+              f"finetuned AuDET={m_ft['audet']:.4f} FREUID={m_ft['freuid']:.4f}  CKA={cka:.4f}")
 
     result_df = pd.DataFrame(rows)
     result_df.to_csv(out_dir / "representation_drift.csv", index=False)

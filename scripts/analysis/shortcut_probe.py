@@ -131,14 +131,16 @@ def main() -> None:
     val_scores_lr = logreg.predict_proba(scaler.transform(X_val))[:, 1]
     m_lr = evaluate(val_scores_lr, y_val)
     results.append({"model": "LogisticRegression", **m_lr})
-    print(f"[shortcut] LogisticRegression  AuDET={m_lr['audet']:.4f} APCER@1%BPCER={m_lr['apcer_at_1pct_bpcer']:.4f}")
+    print(f"[shortcut] LogisticRegression  AuDET={m_lr['audet']:.4f} APCER@1%BPCER={m_lr['apcer_at_1pct_bpcer']:.4f} "
+          f"FREUID={m_lr['freuid']:.4f}")
 
     gbt = HistGradientBoostingClassifier(random_state=cfg.seed)
     gbt.fit(X_train, y_train)
     val_scores_gbt = gbt.predict_proba(X_val)[:, 1]
     m_gbt = evaluate(val_scores_gbt, y_val)
     results.append({"model": "HistGradientBoostingClassifier", **m_gbt})
-    print(f"[shortcut] HistGBT             AuDET={m_gbt['audet']:.4f} APCER@1%BPCER={m_gbt['apcer_at_1pct_bpcer']:.4f}")
+    print(f"[shortcut] HistGBT             AuDET={m_gbt['audet']:.4f} APCER@1%BPCER={m_gbt['apcer_at_1pct_bpcer']:.4f} "
+          f"FREUID={m_gbt['freuid']:.4f}")
 
     pd.DataFrame(results).to_csv(out_dir / "shortcut_probe_results.csv", index=False)
 

@@ -3,6 +3,11 @@
 From the DINOv2 baseline (`finetune_v0`) through the current photo-substitution data-augmentation
 attempt (`photosub_v0`). Covers what was tried, why, what happened, and what's still open.
 
+**Erratum**: every "public LB" number below is the organizers' combined FREUID score
+(DET-F1 harmonic mean of AuDET and APCER@1%BPCER), not raw AuDET, despite this report's own
+"Primary metric AuDET" framing below — see `scripts/analysis/official_score_reconciliation_out/
+official_score_reconciliation_report.md` and `CLAUDE.md`'s Project section.
+
 ## Problem recap
 
 Binary fraud detection on identity-document images. Output a continuous fraud score
