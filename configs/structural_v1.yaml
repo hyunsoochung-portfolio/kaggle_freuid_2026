@@ -1,0 +1,57 @@
+# configs/structural_v1.yaml
+# Fix the two things that made synth_recapture_v1 REGRESS (0.0157 -> 0.0255+):
+#   1. FRAUD TELL -> STRUCTURAL. `face_mode: structural` swaps the photometric
+#      _clarify boost (contrast/saturation/sharpness -> erased by analog blur +
+#      desaturation) for a hard seam + geometric misalignment + texture-break at
+#      the photo boundary. These are edges/geometry -> they SURVIVE print-capture,
+#      like the real "broken overlay integration" tell. field_carve stays (already
+#      mostly structural: a bounded patch where the background pattern is destroyed).
+#   2. ANALOG -> VARIED/PROBABILISTIC. `train_recapture: true` applies the mild,
+#      stochastic recapture_transforms (finetune_v0's, which got 0.0074) to ALL
+#      images as the train transform -- a wide degradation cloud (near-clean ->
+#      moderate) that builds robustness -- instead of the strong, always-on,
+#      narrowly-calibrated recapture_v2 on 50% that both over-fit one synthetic
+#      look AND fought our photometric tell.
+# MODEL recipe kept = synth_tamper_v1 (our 0.0157): non-reg dinov2, pool=map, lr
+# 5e-5 -- so this is a clean test of "structural tell + varied analog" vs 0.0157.
+
+name: structural_v1
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 32
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: false
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true
+  save_every_epoch: true      # keep every epoch (local probe saturates; pick via public)
+  early_stop_patience: 0       # run full 20ep so LR fully anneals
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true
+  synth_tamper:
+    enabled: true
+    prob: 0.3                  # bona-fide -> synthetic fraud
+    text_prob: 0.2             # 20% field-carve (structural), 80% face
+    face_mode: structural      # hard seam + misalignment + texture break (survives analog)
+    train_recapture: true      # varied/probabilistic recapture on ALL images (finetune_v0 style)
+    recapture_prob: 0.0        # NOT the strong always-on recapture_v2
+    val_probe: recapture
+    donor_per_type: 48

@@ -310,6 +310,46 @@ def _face_color_on_gray(target, donor, rng):
     return out, (X0, Y0, X1, Y1)
 
 
+def _face_structural_paste(target, donor, rng, nrng):
+    """STRUCTURAL face-swap tell (survives analog degradation): a hard-edged
+    donor photo, tone-BLENDED (not photometrically boosted like _clarify), with
+    geometric misalignment (rotation + slight scale), a subtle seam line, and a
+    flattened boundary ring where the document texture stops at the photo. Unlike
+    _clarify's contrast/saturation/sharpness boost (which analog blur/desaturation
+    erases), edges + geometry + the texture discontinuity persist through capture."""
+    ft, fd = _detect_face(target), _detect_face(donor)
+    if ft is None or fd is None:
+        return None
+    Ht, Wt = target.shape[:2]
+    Hd, Wd = donor.shape[:2]
+    X0, Y0, X1, Y1 = _photo_box(ft, Wt, Ht)
+    w, h = X1 - X0, Y1 - Y0
+    dx0, dy0, dx1, dy1 = _photo_box(fd, Wd, Hd)
+    if w < 8 or h < 8 or dx1 - dx0 < 8 or dy1 - dy0 < 8:
+        return None
+    paste = cv2.resize(donor[dy0:dy1, dx0:dx1], (w, h)).astype(np.float32)
+    tgt = target[Y0:Y1, X0:X1].astype(np.float32)
+    for c in range(3):                                  # BLEND tone (not boost)
+        paste[..., c] += tgt[..., c].mean() - paste[..., c].mean()
+    paste = np.clip(paste, 0, 255).astype(np.uint8)
+    # geometric misalignment: small rotation + slight scale mismatch (survives blur)
+    m = cv2.getRotationMatrix2D((w / 2, h / 2), rng.uniform(-4, 4), rng.uniform(1.0, 1.06))
+    paste = cv2.warpAffine(paste, m, (w, h), borderMode=cv2.BORDER_REFLECT)
+    out = target.copy()
+    out[Y0:Y1, X0:X1] = paste
+    # subtle seam: faint 1px tone step at the boundary (alpha-blended, not a black box)
+    seam = out.copy()
+    cv2.rectangle(seam, (X0, Y0), (X1 - 1, Y1 - 1), (90, 90, 90), 1)
+    out = cv2.addWeighted(out, 0.6, seam, 0.4, 0)
+    # overlay break: flatten a thin ring at the boundary so the document texture
+    # visibly stops at the photo (the real "broken guilloche" tell, structural)
+    ring = np.zeros((Ht, Wt), np.uint8)
+    cv2.rectangle(ring, (X0, Y0), (X1 - 1, Y1 - 1), 255, 3)
+    blur = cv2.GaussianBlur(out, (0, 0), 1.5)
+    out[ring > 0] = blur[ring > 0]
+    return out, (X0, Y0, X1, Y1)
+
+
 def _find_text_region(img):
     """Most edge-dense field-sized box in the value zone (skip title / barcode)."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -383,9 +423,12 @@ def _field_carve(img, rng, nrng, box=None):
     return out, (x, y, x + w, y + h)
 
 
-def synth_tamper(img, donor, rng, nrng, text_prob=0.2, allow_color_on_gray=False):
+def synth_tamper(img, donor, rng, nrng, text_prob=0.2, allow_color_on_gray=False,
+                 face_mode="photometric"):
     """Bona-fide (BGR) -> synthetic fraud (BGR). Returns (out_bgr, mode); mode is
-    'none' if nothing could be applied (caller keeps the original label 0)."""
+    'none' if nothing could be applied (caller keeps the original label 0).
+    face_mode: 'photometric' (_clarify boost, dies under analog) or 'structural'
+    (hard seam + misalignment + texture break, survives analog)."""
     if rng.random() < text_prob:
         res = _field_carve(img, rng, nrng)
         return (res[0], "field_carve") if res else (img, "none")
@@ -393,9 +436,14 @@ def synth_tamper(img, donor, rng, nrng, text_prob=0.2, allow_color_on_gray=False
         res = _face_color_on_gray(img, donor, rng)
         if res:
             return res[0], "face_color_on_gray"
-    res = _face_clean_paste(img, donor, rng)
-    if res:
-        return res[0], "face_clean_paste"
+    if face_mode == "structural":
+        res = _face_structural_paste(img, donor, rng, nrng)
+        if res:
+            return res[0], "face_structural"
+    else:
+        res = _face_clean_paste(img, donor, rng)
+        if res:
+            return res[0], "face_clean_paste"
     res = _field_carve(img, rng, nrng)                 # no detectable face -> text
     return (res[0], "field_carve") if res else (img, "none")
 
@@ -449,13 +497,14 @@ class SynthTamperWrapper(Dataset, _DonorMixin):
     pass through unchanged. Tamper is fresh-random each epoch (train variety)."""
 
     def __init__(self, base, transform, donor_pool, prob=0.3, text_prob=0.2,
-                 recapture_prob=0.0, seed=0):
+                 recapture_prob=0.0, face_mode="photometric", seed=0):
         self.base = base
         self.tf = transform
         self.donor_pool = donor_pool
         self.prob = float(prob)
         self.text_prob = float(text_prob)
         self.recapture_prob = float(recapture_prob)
+        self.face_mode = face_mode
         self.seed = int(seed)
         self._donor_cache = {}
 
@@ -480,7 +529,7 @@ class SynthTamperWrapper(Dataset, _DonorMixin):
                 bgr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
                 out, mode = synth_tamper(
                     bgr, donor, rng, np.random.default_rng(), self.text_prob,
-                    allow_color_on_gray=(s.type == "BENIN/DL"))
+                    allow_color_on_gray=(s.type == "BENIN/DL"), face_mode=self.face_mode)
                 if mode != "none":
                     img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
                     label = 1

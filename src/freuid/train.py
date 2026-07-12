@@ -131,10 +131,16 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
             SynthProbeDataset,
             SynthTamperWrapper,
             build_donor_pool,
+            recapture_transforms,
             recapture_v2_transforms,
         )
         st = cfg.extra["synth_tamper"]
-        train_tf = build_transforms(size, True, mean, std)   # same aug as the plain 0.039 path
+        # train_recapture: apply the VARIED/probabilistic recapture (finetune_v0 style,
+        # mild->moderate cloud) as the train transform on ALL images -- vs the plain
+        # transform + strong recapture_prob (recapture_v2) that hurt.
+        _varied = bool(st.get("train_recapture", False))
+        train_tf = build_transforms(size, True, mean, std,
+                                    augment="recapture" if _varied else None)
         donor_pool = build_donor_pool(
             cfg.data_dir, seed=cfg.seed, per_type=int(st.get("donor_per_type", 48)),
             exclude_ids=val_ids)   # keep val images out of the donor pool (no leakage)
@@ -142,12 +148,14 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader]:
         train_ds = SynthTamperWrapper(
             base_train, train_tf, donor_pool,
             prob=float(st.get("prob", 0.3)), text_prob=float(st.get("text_prob", 0.2)),
-            recapture_prob=float(st.get("recapture_prob", 0.0)), seed=cfg.seed,
+            recapture_prob=float(st.get("recapture_prob", 0.0)),
+            face_mode=st.get("face_mode", "photometric"), seed=cfg.seed,
         )
         if st.get("val_probe", "synth") == "recapture":
             # recapture probe: val (bona+fraud, stratified) + deterministic analog
-            # copies (labels kept) -> non-saturating compass on the analog axis.
-            make_rc = functools.partial(recapture_v2_transforms, size, mean, std)
+            # copies (labels kept). Use the SAME recapture family as training.
+            _rc = recapture_transforms if _varied else recapture_v2_transforms
+            make_rc = functools.partial(_rc, size, mean, std)
             base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
             val_ds = AnalogDoubleDataset(base_val, clean_tf, make_rc,
                                          deterministic_seed=cfg.seed)
