@@ -1,0 +1,81 @@
+# configs/photosub_v0_noablate_nopairs.yaml
+#
+# ABLATION (a) of configs/photosub_v0.yaml -- see that file for the full hypothesis, mode-
+# weighting provenance, and pre-registered gates; this file only documents what's DIFFERENT.
+#
+# Isolates: photosub DATA alone, with twin-pair batching and the pair-hinge loss both OFF.
+# Everything else -- backbone, LLRD, AUC loss, recapture augmentation, TTA, the photosub rows
+# CSV, share, mode_weights -- is byte-identical to photosub_v0.yaml (confirmed via
+# scripts/config_diff.py). If this ablation alone recovers most of photosub_v0's deep/boundary
+# probe gain, the effect is coming from exposure to the new evidence family during training, not
+# from twin pairing or the hinge term specifically -- important for the eventual writeup's
+# attribution claim.
+#
+# twin_pair_prob: 0.0 means TwinPairBatchSampler never forces a photosub row's clean source into
+# the same batch (co-occurrence stays at incidental/chance rate -- see
+# tests/test_photosub_mixing.py's TestTwinPairBatchSampler.test_twin_pair_prob_zero_rate_matches_chance).
+# pair_hinge_weight: 0.0 is belt-and-suspenders here (with no forced pairs, qualifying groups in
+# a batch would be rare anyway) but kept explicit rather than relying on that incidental rate.
+#
+# Run AFTER photosub_v0.yaml itself, only if GPU budget allows -- this is not the primary config.
+
+name: photosub_v0_noablate_nopairs
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size: 32
+lr: 1.0e-4
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  augment: recapture
+  synth_tamper_prob: 0.3
+  auc_loss_weight: 0.1
+
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
+
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+
+  train_last_k_blocks: null
+  grad_checkpointing: false
+  amp: true
+
+  photosub:
+    enabled: true
+    rows_csv: data/processed/photosub_generated/rows.csv
+    share: 0.15
+    mode_weights:
+      A: 0.4444
+      B: 0.3333
+      C: 0.2222
+      D: 0.15
+
+    # --- Ablation (a): both OFF, unlike photosub_v0.yaml's 0.5 / 0.5 ---
+    twin_pair_prob: 0.0
+    pair_hinge_weight: 0.0
+    pair_margin: 1.0
+
+    probe_hooks: true

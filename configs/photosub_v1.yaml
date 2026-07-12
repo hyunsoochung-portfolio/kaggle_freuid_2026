@@ -1,0 +1,114 @@
+# configs/photosub_v1.yaml
+#
+# Full spec: docs/photosub_v1_spec.md. Read that before touching this file -- it has the
+# pre-registered gates, the render-gate review status for every shape/effect kwarg below, and
+# the rationale for every changed knob vs configs/photosub_v0.yaml.
+#
+# WHAT CHANGED FROM photosub_v0.yaml (confirmed via scripts/config_diff.py):
+#   - MODE_A kept (not dropped), now with irregular_shape_prob/tear_prob at real nonzero
+#     weights (reviewed + approved -- docs/photosub_renders/mode_a_shape_variants_sheet.png).
+#     arch_shape_prob/tape_prob exist in the generator but stay at 0.0 here: implemented,
+#     unit-tested, NOT yet rendered/reviewed (needs the regions cache -> VESSL).
+#   - MODE_C restricted to ghost-bearing templates only at generation time (ghostless-C
+#     dropped) -- see generators.py's module docstring for why a clean digital swap on a
+#     non-ghost template has zero evidence to point to.
+#   - MODE_D unchanged in kind (ghost templates only, ghost_darken_prob active).
+#   - per_template_cap: NEW. Bounds any single document template's share of each mode's
+#     selection -- movement_census_part2 found MODE_D concentrated 2.81x on MAURITIUS/ID vs
+#     1.82x on EGYPT/DL (relative to real-fraud share); this caps it going forward.
+#   - Twin pairing is now per-MODE (A/B on, C/D off) automatically -- no new config knob, see
+#     freuid.photosub.mixing.is_pairable_mode. The v0 twin_pair_prob number below now only
+#     ever applies to A/B rows.
+#   - checkpoint_selection: NEW block. Gate-composite eligibility + latest-stable + optional
+#     last-k averaging -- see freuid.photosub.checkpoint_select and the spec doc's gates.
+#
+# Everything else (backbone, 518px, LLRD, AUC loss, recapture augmentation, 3-scale rank-avg
+# TTA, val split) is byte-identical to photosub_v0.yaml / finetune_v0.yaml.
+
+name: photosub_v1
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size: 32
+lr: 1.0e-4
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  augment: recapture
+  synth_tamper_prob: 0.3
+  auc_loss_weight: 0.1
+
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
+
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+
+  train_last_k_blocks: null
+  grad_checkpointing: false
+  amp: true
+
+  # --- photo-substitution data mixing + twin-pair batching (see spec doc for full rationale) ---
+  photosub:
+    enabled: true
+
+    # v1 rows CSV -- generated separately via scripts/generate_photosub_dataset.py with the new
+    # --arch-shape-prob/--tape-prob/ghostless-C flags (see spec doc's generation command). NOT
+    # the v0 rows.csv (which predates the shape-realism / ghostless-C changes) -- do not point
+    # this at data/processed/photosub_generated/rows.csv (v0's path) without regenerating.
+    rows_csv: data/processed/photosub_generated_v1/rows.csv
+
+    share: 0.15
+
+    # Same relative A/B/C/D weighting as v0 (still the best available prior -- confirmed n=9
+    # deep-miss prevalence for A/B/C, modest hypothesis-driven D) -- the v1 FIX is in what each
+    # mode generates (shape variety for A, ghost-only restriction for C), not in reweighting
+    # away from A. Renormalized the same way v0's was.
+    mode_weights:
+      A: 0.4444
+      B: 0.3333
+      C: 0.2222
+      D: 0.15
+
+    # NEW: bounds any single template's share of EACH mode's own selection. 0.6 means neither
+    # MAURITIUS/ID nor EGYPT/DL (the only two eligible for C/D) can exceed 60% of that mode's
+    # rows -- see freuid.photosub.mixing._select_with_template_cap and the spec doc.
+    per_template_cap: 0.6
+
+    twin_pair_prob: 0.5
+    pair_hinge_weight: 0.5
+    pair_margin: 1.0
+
+    probe_hooks: true
+
+    # NEW: gate-composite checkpoint selection (freuid.photosub.checkpoint_select). Additive --
+    # the existing probe_audet-based checkpoints/<name>.pt is still written as before; this
+    # writes checkpoints/<name>_gate_selected.pt (latest-stable) and
+    # checkpoints/<name>_lastk_avg.pt (SWA-style average) alongside it.
+    checkpoint_selection:
+      enabled: true
+      deep9_majority_frac: 0.5
+      ceiling_drop_tolerance: 0.20
+      stability_window: 2
+      last_k_averaging: 3   # 0 disables the averaged checkpoint; keeps the last 3 eligible epochs

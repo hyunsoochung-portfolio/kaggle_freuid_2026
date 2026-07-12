@@ -1,0 +1,86 @@
+# configs/photosub_v0_noablate_nohinge.yaml
+#
+# ABLATION (b) of configs/photosub_v0.yaml -- see that file for the full hypothesis, mode-
+# weighting provenance, and pre-registered gates; this file only documents what's DIFFERENT.
+#
+# Isolates: photosub DATA + twin-pair batching, with the pair-hinge loss term OFF. Everything
+# else -- backbone, LLRD, AUC loss, recapture augmentation, TTA, the photosub rows CSV, share,
+# mode_weights, twin_pair_prob -- is byte-identical to photosub_v0.yaml (confirmed via
+# scripts/config_diff.py). Twin pairs still land in the same batch at the same rate as
+# photosub_v0's main run; the model just never gets the explicit tampered-vs-clean-source margin
+# penalty pushing on them (freuid.loss.pair_hinge_loss). If this ablation performs close to
+# photosub_v0 itself, the pair-hinge term isn't pulling its weight and the gain (if any) is
+# coming from photosub data + co-batching alone (e.g. via BCE/AUC loss noticing the harder
+# in-batch contrast); if it performs closer to ablation (a) (photosub_v0_noablate_nopairs.yaml),
+# the explicit hinge term is what's actually doing the work.
+#
+# pair_hinge_weight: 0.0 -- run_epoch's use_pairs branch still activates (twin_pair_prob > 0
+# still builds the twin-aware batch sampler and 3-tuple batches), but the loss term itself is
+# skipped exactly like every other config with this weight at 0 (see freuid.train.run_epoch's
+# docstring: 0.0 is bit-for-bit identical to the pre-photosub path for the LOSS, though the
+# batch COMPOSITION here still differs from ablation (a) since twin_pair_prob stays 0.5).
+#
+# Run AFTER photosub_v0.yaml itself, only if GPU budget allows -- this is not the primary config.
+
+name: photosub_v0_noablate_nohinge
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size: 32
+lr: 1.0e-4
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  augment: recapture
+  synth_tamper_prob: 0.3
+  auc_loss_weight: 0.1
+
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
+
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+
+  train_last_k_blocks: null
+  grad_checkpointing: false
+  amp: true
+
+  photosub:
+    enabled: true
+    rows_csv: data/processed/photosub_generated/rows.csv
+    share: 0.15
+    mode_weights:
+      A: 0.4444
+      B: 0.3333
+      C: 0.2222
+      D: 0.15
+
+    # Twin pairing stays ON, matching photosub_v0.yaml exactly...
+    twin_pair_prob: 0.5
+
+    # --- Ablation (b): hinge OFF, unlike photosub_v0.yaml's 0.5 ---
+    pair_hinge_weight: 0.0
+    pair_margin: 1.0
+
+    probe_hooks: true

@@ -243,7 +243,11 @@ def build_loaders(
         base_n_positive = sum(1 for s in base_samples if s.label == 1)
         mode_weights = photosub_cfg.get("mode_weights", {"A": 0.44, "B": 0.33, "C": 0.22, "D": 0.0})
         share = float(photosub_cfg.get("share", 0.15))
-        selected = select_mixed_rows(rows_df, train_ids, mode_weights, share, base_n_positive, seed=cfg.seed)
+        per_template_cap = photosub_cfg.get("per_template_cap")  # None = no cap (photosub_v0 behavior)
+        selected = select_mixed_rows(
+            rows_df, train_ids, mode_weights, share, base_n_positive, seed=cfg.seed,
+            per_template_cap=per_template_cap,
+        )
         if selected.empty:
             print(
                 f"[train] WARNING: photosub.enabled=True but 0 rows selected from {rows_csv} "
@@ -497,6 +501,41 @@ def main() -> None:
         from freuid.photosub.probes import run_probe_hooks
         probe_hook_tf = build_transforms(data_cfg["image_size"], False, data_cfg["mean"], data_cfg["std"])
 
+    # Gate-composite checkpoint selection (photosub_v1, opt-in -- see
+    # freuid.photosub.checkpoint_select and docs/photosub_v1_spec.md's pre-registered gates).
+    # Requires run_photosub_probes (the gates read off that stage's per-epoch output).
+    ckpt_sel_cfg = photosub_cfg.get("checkpoint_selection", {}) or {}
+    run_checkpoint_selection = run_photosub_probes and ckpt_sel_cfg.get("enabled", False)
+    if run_checkpoint_selection:
+
+        import pandas as _pd
+
+        from freuid.photosub.checkpoint_select import (
+            CheckpointTracker,
+            GateThresholds,
+            average_state_dicts,
+            evaluate_gates,
+            extract_boundary_baseline,
+            extract_ceiling_baseline,
+        )
+        from freuid.photosub.probes import probes_dir
+        _deep_csv = probes_dir(cfg.data_dir) / "missed_frauds_deep_ids.csv"
+        _deep_df = _pd.read_csv(_deep_csv, dtype={"id": str})
+        _deep9_baseline_logits = dict(zip(_deep_df["id"], _deep_df["logit"]))
+        gate_thresholds = GateThresholds(
+            deep9_majority_frac=float(ckpt_sel_cfg.get("deep9_majority_frac", 0.5)),
+            ceiling_drop_tolerance=float(ckpt_sel_cfg.get("ceiling_drop_tolerance", 0.20)),
+            stability_window=int(ckpt_sel_cfg.get("stability_window", 2)),
+        )
+        checkpoint_tracker = CheckpointTracker(thresholds=gate_thresholds)
+        _ceiling_baseline = None
+        _boundary_baseline = None
+        last_k = int(ckpt_sel_cfg.get("last_k_averaging", 0))  # 0 = disabled
+        retain_window = max(gate_thresholds.stability_window, last_k, 1)
+        _recent_state_dicts: dict[int, dict] = {}  # epoch -> CPU state_dict, ring buffer
+        print(f"[train] gate-composite checkpoint selection enabled: {gate_thresholds} "
+              f"last_k_averaging={last_k or 'off'} retain_window={retain_window}")
+
     # AMP: disabled GradScaler is a documented no-op passthrough, so this is safe to
     # always construct and thread through run_epoch -- every config without
     # extra.amp=True gets scaler.is_enabled()==False and reproduces the exact FP32 path.
@@ -566,6 +605,27 @@ def main() -> None:
                 )
                 print(f"  [probe_threshold] ceiling budget exposure by template: {template_str}")
 
+        if run_checkpoint_selection:
+            gate_result = evaluate_gates(
+                epoch, probe_metrics, _deep9_baseline_logits, _ceiling_baseline, _boundary_baseline,
+                gate_thresholds,
+            )
+            checkpoint_tracker.record_epoch(gate_result)
+            if epoch == 1:
+                _ceiling_baseline = extract_ceiling_baseline(probe_metrics)
+                _boundary_baseline = extract_boundary_baseline(probe_metrics)
+            print(
+                f"  [gate] composite={gate_result.composite_pass} "
+                f"deep9={gate_result.deep9_pass} ceiling={gate_result.ceiling_pass} "
+                f"boundary={gate_result.boundary_pass} | "
+                f"eligible_epochs={checkpoint_tracker.eligible_epochs()}"
+            )
+            _recent_state_dicts[epoch] = {
+                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+            }
+            for stale_epoch in [e for e in _recent_state_dicts if e <= epoch - retain_window]:
+                del _recent_state_dicts[stale_epoch]
+
         lr_str = f"lr={lr:.2e}" if len(last_lrs) == 1 else f"lr_head={lr:.2e} lr_min={min(last_lrs):.2e}"
         print(
             f"\n[epoch {epoch:>2}/{cfg.epochs}] {lr_str} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
@@ -584,6 +644,61 @@ def main() -> None:
                 ckpt,
             )
             print(f"  -> saved {ckpt} ({ckpt_key}={best_metric:.6f})")
+
+    if run_checkpoint_selection:
+        _finalize_checkpoint_selection(
+            checkpoint_tracker, _recent_state_dicts, cfg, last_k, average_state_dicts,
+        )
+
+
+def _finalize_checkpoint_selection(
+    checkpoint_tracker, recent_state_dicts: dict[int, dict], cfg: Config, last_k: int,
+    average_state_dicts_fn,
+) -> None:
+    """Post-training selection: gate-composite latest-stable, plus optional last-k averaging.
+    ADDITIVE artifacts alongside the existing metric-based `checkpoints/<name>.pt` -- never
+    overwrites or replaces it, so this feature can never change behavior for a run that opts in
+    but whose gates never confirm eligible, or for any other config that doesn't opt in at all.
+    """
+    eligible = checkpoint_tracker.eligible_epochs()
+    latest_stable = checkpoint_tracker.latest_stable_epoch()
+    print(f"[train] checkpoint selection: eligible_epochs={eligible} latest_stable={latest_stable} "
+          f"retained_in_buffer={sorted(recent_state_dicts)}")
+
+    if latest_stable is not None and latest_stable in recent_state_dicts:
+        ckpt = Path("checkpoints") / f"{cfg.name}_gate_selected.pt"
+        torch.save(
+            {
+                "model": recent_state_dicts[latest_stable], "config": vars(cfg),
+                "epoch": latest_stable, "selection": "gate_composite_latest_stable",
+            },
+            ckpt,
+        )
+        print(f"  -> saved {ckpt} (epoch {latest_stable}, gate-composite latest-stable)")
+    elif latest_stable is not None:
+        print(f"  latest_stable=epoch {latest_stable} fell outside the retained checkpoint "
+              "buffer -- increase retain_window / last_k_averaging to capture it next run")
+    else:
+        print("  no latest-stable epoch found (gates never confirmed a stable eligible window) "
+              "-- falling back to the metric-based checkpoint only")
+
+    if last_k > 0:
+        eligible_in_buffer = [e for e in eligible if e in recent_state_dicts]
+        pool = (
+            eligible_in_buffer[-last_k:] if eligible_in_buffer
+            else sorted(recent_state_dicts)[-last_k:]
+        )
+        if pool:
+            averaged = average_state_dicts_fn([recent_state_dicts[e] for e in pool])
+            ckpt = Path("checkpoints") / f"{cfg.name}_lastk_avg.pt"
+            torch.save(
+                {"model": averaged, "config": vars(cfg), "epochs_averaged": pool,
+                 "selection": f"last_{last_k}_averaging"},
+                ckpt,
+            )
+            print(f"  -> saved {ckpt} (averaged epochs {pool})")
+        else:
+            print("  last_k_averaging enabled but no checkpoints retained to average")
 
 
 if __name__ == "__main__":

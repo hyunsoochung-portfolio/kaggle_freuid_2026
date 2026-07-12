@@ -1,0 +1,151 @@
+# configs/photosub_v0.yaml
+#
+# HYPOTHESIS: finetune_v0 misses several confirmed photo-substitution frauds (see
+# scripts/analysis/deep_miss_dossiers.py -- 9 "deep miss" ids in TRANS_1/3/4, verdict F, plus a
+# further 59 TRANS_5 "boundary" ids at ~73.8% F-rate that may share the same failure mode)
+# because it never saw this specific evidence family in training: a physically- or digitally-
+# substituted portrait, recaptured through the same analog-hole pipeline as everything else, is
+# visually and statistically close to a bona-fide card UNLESS the model has learned to compare
+# the portrait/frame region against something -- which nothing in finetune_v0's recipe asks it
+# to do. This config adds offline-generated photo-substitution training rows (src/freuid/
+# photosub/) at a modest share of total positives, plus "twin-pair batching": when a batch
+# contains a photosub-tampered row, its own bona-fide SOURCE image (untouched) is, with
+# probability twin_pair_prob, pulled into the same batch, and a pair-hinge loss term directly
+# penalizes the model for not ranking the tampered twin above its own clean source. The pair
+# differs ONLY in the substitution evidence, which is exactly the feature the deep-miss ids show
+# the model currently fails to use.
+#
+# Everything else is finetune_v0's exact recipe (backbone, 518px, LLRD, AUC loss, recapture
+# augmentation, 3-scale rank-avg TTA) -- confirmed via scripts/config_diff.py against
+# finetune_v0.yaml. This isolates "does photosub data + twin pairing help" from any other
+# change; see the ablation plan at the bottom of this comment block for how the follow-up
+# writeup will attribute the effect between photosub data alone, twin pairs alone, and the pair
+# hinge term.
+#
+# MODE_A/B/C/D WEIGHTING: mode_weights below for A/B/C (0.44 / 0.33 / 0.22) come from the
+# CONFIRMED per-id mode assignment among the 9 deep-miss ids (deep_miss_dossiers.py's
+# MODE_ASSIGNMENTS + CHECKLIST_RESULTS: A=4/9, B=3/9, C=2/9, one tentative by elimination) --
+# NOT "9+59", despite CLAUDE.md's next-step framing suggesting that combined population: the 59
+# TRANS_5 boundary ids (data/probes/missed_frauds_boundary_ids.csv) carry NO per-id mode label at
+# all (that CSV has no `mode` column), only an aggregate "does fixing photosub recover some of
+# this boundary mass" question -- there is no n=59 mode breakdown to weight by. n=9 is a small
+# sample for a weighting scheme; treat these fractions as a reasonable prior, not a precise
+# population estimate.
+#
+# D=0.15 is DIFFERENT in kind from A/B/C's weights: it is NOT backed by confirmed prevalence
+# (0/9 -- ghost mismatch was never observed among the 9 deep-miss ids). It's included anyway, at
+# a modest weight, because 0/9 isn't evidence it doesn't happen -- only 2 of the 5 known
+# templates (EGYPT/DL, MAURITIUS/ID) even carry a ghost/secondary-portrait feature at all, so a
+# small n=9 sample landing zero ghost-mismatch hits among mostly non-ghost templates is
+# unsurprising either way. The earlier legibility objection in generators.generate_mode_d's
+# docstring (training only on crisp ghosts risks teaching a signal the model can't read on real,
+# often-dark ghosts) is addressed, not ignored: a slice of D_ghost rows (--ghost-darken-prob,
+# see scripts/generate_photosub_dataset.py) are deliberately dimmed to match the real illegible
+# case (id 40dd1055fd). After renormalization across all 4 active modes, D ends up at roughly
+# 13% of photosub rows -- noticeably smaller than A, comparable to C.
+#
+# PRE-REGISTERED LOCAL GATES (check BEFORE spending a submission -- see CLAUDE.md's Validation
+# section on why the recapture probe alone is not trustworthy for ranking two good candidates):
+#   1. deep-probe: majority of the 9 deep-miss ids' rank percentiles (probe_deep_detail, logged
+#      per-id every epoch) rise materially from their finetune_v0 baseline (~33-61 pct_rank
+#      range per data/probes/missed_frauds_deep_ids.csv's original pct_rank column, computed
+#      against full public_test -- NOT directly comparable to this run's probe_deep_mean_pct_rank,
+#      which is against the current epoch's val split; judge the TREND, not an absolute number)
+#      into the ceiling region, with no id collapsing further than its finetune_v0 baseline.
+#   2. clean-floor guard: probe_clean_floor_mean_logit does not rise materially across training
+#      (this is the regression guard: photosub data must not make the model suspicious of
+#      ordinary bona-fide cards).
+#   3. ceiling retention: probe_ceiling_mean_logit (data/probes/ceiling_frauds_sample_ids.csv,
+#      200 ids finetune_v0 already scores confidently as fraud) stays saturated near the ceiling
+#      mode -- the fix must not trade away existing detection capability for the deep/boundary
+#      gain.
+#   4. training-distribution sanity: ordinary val AuDET / APCER@1%BPCER / probe_audet no worse
+#      than finetune_v0's own (0.000002 / -- / --; see CLAUDE.md).
+#
+# ABLATION PLAN (separate configs, run after this one if GPU budget allows, so the eventual
+# writeup can attribute the gain):
+#   (a) photosub_v0_noablate_nopairs.yaml   -- photosub data, twin_pair_prob: 0.0, pair_hinge_weight: 0.0
+#   (b) photosub_v0_noablate_nohinge.yaml   -- photosub data + twin pairs, pair_hinge_weight: 0.0
+# Both drafted (see those files); confirmed via scripts/config_diff.py to differ from this file
+# ONLY in name + the specific ablated field(s). This file is still the main config -- smoke-run
+# and gate this one first before spending GPU budget on the ablations.
+
+name: photosub_v0
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_reg4_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size: 32
+lr: 1.0e-4
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  augment: recapture
+  synth_tamper_prob: 0.3
+  auc_loss_weight: 0.1
+
+  use_recapture_probe: true
+  recapture_probe_seed: 1234
+  checkpoint_metric: probe_audet
+
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+
+  val_doc_types:
+    - EGYPT/DL
+    - GUINEA/DL
+    - BENIN/DL
+    - MOZAMBIQUE/DL
+    - MAURITIUS/ID
+
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+
+  train_last_k_blocks: null
+  grad_checkpointing: false
+  amp: true
+
+  # --- New for this experiment: photo-substitution data mixing + twin-pair batching ---
+  photosub:
+    enabled: true
+
+    # Offline-generated rows CSV (freuid.photosub.pipeline.append_rows_csv's schema). Produced
+    # by scripts/generate_photosub_dataset.py -- see that script's own docstring for the
+    # donor-pool/hard-fraction/mode-weight generation-time knobs (distinct from this section's
+    # TRAIN-TIME selection knobs below, which subsample whatever this CSV contains).
+    rows_csv: data/processed/photosub_generated/rows.csv
+
+    # Target share of TOTAL positives (original fraud + photosub) that are photosub-derived.
+    share: 0.15
+
+    # Mode prevalence weighting -- see the MODE_A/B/C/D WEIGHTING comment block above.
+    # A/B/C: confirmed n=9 prevalence. D: modest, hypothesis-driven (not confirmed prevalence).
+    mode_weights:
+      A: 0.4444
+      B: 0.3333
+      C: 0.2222
+      D: 0.15
+
+    # Twin-pair batching: when a batch contains a photosub row, try (this probability) to also
+    # include its own bona-fide source image in the same batch -- see freuid.photosub.mixing.
+    twin_pair_prob: 0.5
+
+    # Pair-hinge loss (freuid.loss.pair_hinge_loss): penalizes relu(pair_margin - (tampered_logit
+    # - clean_logit)) for every twin pair the sampler landed together this batch. ON by default
+    # for this run (not an ablation) since these pairs are exactly the ones finetune_v0 currently
+    # fails to separate -- weight kept small relative to BCE so it nudges rather than dominates.
+    pair_hinge_weight: 0.5
+    pair_margin: 1.0
+
+    # Per-epoch probe hooks (freuid.photosub.probes) -- the pre-registered gates above read off
+    # these every epoch. Fails loudly (FileNotFoundError) if a probe CSV is missing.
+    probe_hooks: true
