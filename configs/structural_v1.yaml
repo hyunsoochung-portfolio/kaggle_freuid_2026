@@ -23,7 +23,7 @@ backbone: vit_base_patch14_dinov2.lvd142m
 pretrained: true
 image_size: 518
 
-epochs: 20
+epochs: 30
 batch_size: 32
 lr: 5.0e-5
 weight_decay: 5.0e-2
@@ -40,7 +40,7 @@ extra:
   missing_id_score: 0.5
   save_last: true
   save_every_epoch: true      # keep every epoch (local probe saturates; pick via public)
-  early_stop_patience: 0       # run full 20ep so LR fully anneals
+  early_stop_patience: 0       # run full 30ep so LR (cosine, T_max=epochs) fully anneals
   llrd:
     enabled: true
     decay: 0.7
