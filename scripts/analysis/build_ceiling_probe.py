@@ -12,6 +12,17 @@ mode, not silently give ground back to fix the misses elsewhere."
 Pure pandas over the already-computed scripts/analysis/logit_census_raw.csv -- no GPU, no
 checkpoint needed. Sampling is seeded (SEED=2, distinct from freeze_probes' SURVEY_SEED=1 and
 deep_miss_dossiers' MODE_ASSIGNMENTS provenance) for reproducibility.
+
+``doc_type_proxy`` is a CLASSIFIER OUTPUT, not a ground-truth label: public_test's own ``type``
+column is None for all 142,818 rows (document type is never revealed for the test split -- see
+CLAUDE.md's "document types not seen in training" risk), so a naive merge against
+freuid.data.load_labels' ``type`` column silently produces 100% NaN (a real bug this file used to
+have -- caught by a photosub_v1 smoke-test run finding train.py's per-template ceiling-exposure
+line never printed). Reuses movement_census.py's ``color_hist_classify`` /
+``build_color_hist_reference`` (CPU-only, no checkpoint, nearest-centroid over a 5-known-type RGB
+histogram built from labeled TRAIN images) -- the same working proxy classifier movement_census
+Part 2 already validated for this exact "classify a ceiling-zone public_test id with no ground
+truth" problem.
 """
 
 from __future__ import annotations
@@ -23,6 +34,9 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from movement_census import build_color_hist_reference, color_hist_classify  # noqa: E402
+
 from freuid.data import load_labels  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -52,9 +66,14 @@ def build(
     rng = np.random.default_rng(seed)
     sample = in_block.sample(n=n_sample, random_state=rng.integers(2**31 - 1)).copy()
 
-    test_meta = load_labels(data_dir, "public_test")[["id", "type"]]
+    test_meta = load_labels(data_dir, "public_test")[["id", "path"]]
     sample = sample.merge(test_meta, on="id", how="left")
-    sample = sample.rename(columns={"mean_logit": "logit", "type": "doc_type_proxy"})
+    have_path = sample["path"].notna() & sample["path"].map(lambda p: Path(p).exists())
+    centroids = build_color_hist_reference(data_dir)
+    preds, _margins = color_hist_classify(sample.loc[have_path, "path"].tolist(), centroids)
+    sample["doc_type_proxy"] = None
+    sample.loc[have_path, "doc_type_proxy"] = preds
+    sample = sample.rename(columns={"mean_logit": "logit"})
     sample["stratum"] = "CEILING"
     out = sample[["id", "stratum", "logit", "doc_type_proxy"]].sort_values("logit", ascending=False)
 
