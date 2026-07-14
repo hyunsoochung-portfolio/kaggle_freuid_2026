@@ -1,8 +1,9 @@
 """Visualisation check for synthetic-tamper augmentation.
 
 Saves 8 images (≥2 of each edit type) that have been tampered and then
-passed through recapture_transforms — i.e. exactly what the model sees
-during training when synth_tamper_prob > 0.
+passed through recapture_transforms. Illustrative of the tamper primitives only:
+the synth-tamper training path was removed when analog-double became the default,
+so this is no longer part of training (the primitives are kept for reference/analysis).
 
 Usage (run from repo root on the VESSL workspace):
     python scripts/check_synth_tamper.py --config configs/baseline_v0.yaml

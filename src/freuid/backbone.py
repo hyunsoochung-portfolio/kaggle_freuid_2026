@@ -20,7 +20,6 @@ import contextlib
 import torch
 import torch.nn as nn
 
-
 _EMBED_DIM = {
     "dinov3_vitb16": 768,
     "dinov2_vitb14": 768,
@@ -77,7 +76,10 @@ class _FeatureWrapper(nn.Module):
         """
         device = imgs.device
         amp_ctx: contextlib.AbstractContextManager
-        amp_ctx = torch.autocast(device_type="cuda") if device.type == "cuda" else contextlib.nullcontext()
+        amp_ctx = (
+            torch.autocast(device_type="cuda") if device.type == "cuda"
+            else contextlib.nullcontext()
+        )
 
         with amp_ctx:
             if self._backend == "transformers":
@@ -126,7 +128,7 @@ def _load_dinov3_from_hf(hf_repo: str) -> tuple[nn.Module, str]:
             "Ensure HF_TOKEN is set (export HF_TOKEN=...) and you have accepted "
             "the license at https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m"
         ) from e
-    print(f"[backbone] loaded dinov3_vitb16 from HuggingFace (transformers)")
+    print("[backbone] loaded dinov3_vitb16 from HuggingFace (transformers)")
     return model, "transformers"
 
 
@@ -181,8 +183,3 @@ def load_backbone(backbone_name: str) -> _FeatureWrapper:
         raw, int(patch_size), int(embed_dim), backend=backend,
         num_register_tokens=num_register_tokens,
     )
-
-
-def embed_dim_for(backbone_name: str) -> int:
-    """CLS token dimension for a given backbone name."""
-    return _EMBED_DIM.get(backbone_name, 768)

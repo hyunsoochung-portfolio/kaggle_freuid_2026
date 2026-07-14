@@ -64,11 +64,14 @@ a general vision / segmentation / face model.
 
 ## Validation (the part that was broken before)
 
-Do not trust single-domain LODO on the easiest type — it saturates and predicts nothing. Per epoch
-the **compass** is a **recapture probe**: apply the analog/print-and-capture augmentation to a
-held-out clean split and measure AuDET on it; checkpoint on the lowest probe AuDET. Periodically
-run **multi-fold LODO** (hold out each document type in turn, average) as the cross-domain check.
-Sanity checks: init BCE ≈ 0.693 on a balanced batch; a single batch must overfit to ~0.
+The validation split is a **stratified (label×type) split** (`stratified_split()` in
+`build_loaders`) — keeping both the fraud/bona-fide balance and the document-type mix
+representative, so val doesn't collapse onto the easiest type and saturate. Per epoch the
+**compass** is a **recapture probe**: apply the analog/print-and-capture augmentation to a
+held-out clean split and measure AuDET on it; checkpoint on the lowest probe AuDET. Stratifying by
+type matters because the hidden test probes generalization to document types not seen in training,
+so val must span the type mix rather than one easy domain. Sanity checks: init BCE ≈ 0.693 on a
+balanced batch; a single batch must overfit to ~0.
 
 ## Compute & environment
 

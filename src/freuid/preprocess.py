@@ -23,7 +23,6 @@ import numpy as np
 from freuid.config import Config
 from freuid.data import load_labels
 
-
 _CARD_SIZE = 512  # canonical output resolution
 
 # Module-level singletons — loaded lazily, once per process.
@@ -288,6 +287,7 @@ def precache_regions(
 
 if __name__ == "__main__":
     import argparse
+
     from freuid.config import load_config
 
     parser = argparse.ArgumentParser(description="Precache rectified cards and face boxes")

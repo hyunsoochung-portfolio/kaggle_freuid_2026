@@ -28,27 +28,12 @@ extra:
   # Augmentation: print-and-capture pipeline (no flip)
   augment: recapture
 
-  # Synthetic tamper: 30% of bona-fide per batch become synthetic positives
-  synth_tamper_prob: 0.3
-
   # Pairwise soft-AUC term: pushes fraud scores above bona-fide scores.
   # 0.0 = pure BCE (reproduces S0 loss exactly); 0.1 = 10% AUC penalty.
   auc_loss_weight: 0.1
-
-  # Recapture probe: the compass — checkpoint on lowest probe AuDET
-  use_recapture_probe: true
-  recapture_probe_seed: 1234
-  checkpoint_metric: probe_audet
 
   # Inference: TTA at three scales (rank-averaged, no flip)
   # true = auto [320, 384, 448]; or a list: [320, 384, 448]
   tta: true
 
   missing_id_score: 0.5
-
-  val_doc_types:
-    - EGYPT/DL
-    - GUINEA/DL
-    - BENIN/DL
-    - MOZAMBIQUE/DL
-    - MAURITIUS/ID

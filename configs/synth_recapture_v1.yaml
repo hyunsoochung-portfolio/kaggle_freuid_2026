@@ -1,0 +1,50 @@
+# configs/synth_recapture_v1.yaml
+# Option C: the synth_tamper win (0.0157) + calibrated analog (recapture_v2).
+# Model recipe = the 0.039 config (dinov2 attn-pool + AUC + TTA + LLRD + AMP).
+#   TRAIN: SynthTamperWrapper turns bona-fide into synthetic fraud (digital tells,
+#     prob 0.3), then recapture_prob=0.5 of ALL images get the calibrated analog
+#     degradation on top (label preserved) -> digital tells + analog robustness.
+#   VAL:  recapture probe = the stratified val (bona+fraud, all types) + a
+#     deterministic recapture_v2 analog copy of each (labels kept) -> a compass on
+#     the ANALOG axis, which the model can't memorise (unlike the synth probe that
+#     saturated). Checkpoint on that val AuDET.
+# Goal: close the gap to finetune_v0 (0.0074), which is the analog axis.
+
+name: synth_recapture_v1
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 20
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 32
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: false
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true
+  save_every_epoch: true    # keep every epoch's checkpoint (pick what to submit later)
+  early_stop_patience: 0     # OFF -- run the full schedule so LR fully anneals at ep20
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true
+  synth_tamper:
+    enabled: true
+    prob: 0.3            # bona-fide -> synthetic fraud (digital tells)
+    text_prob: 0.2       # of tampered: 20% field-carve, 80% face
+    recapture_prob: 0.5  # of ALL train images: apply calibrated analog degradation
+    val_probe: recapture # val compass = recapture probe (non-saturating, analog axis)
+    donor_per_type: 48

@@ -15,10 +15,9 @@ Label convention matches metrics.py: 1 = fraud, 0 = bona-fide, -1 = unknown (tes
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-
-import logging
 
 import numpy as np
 import pandas as pd
@@ -50,7 +49,8 @@ class Sample:
     is_digital: bool | None = None
     type: str | None = None  # "COUNTRY/DOCTYPE", e.g. "EGYPT/DL"
     card_path: Path | None = None   # rectified card PNG from regions cache (use_rectify)
-    face_box: dict | None = field(default=None, repr=False)  # bbox from regions cache (use_face_region)
+    # bbox from regions cache (use_face_region)
+    face_box: dict | None = field(default=None, repr=False)
 
 
 def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
@@ -71,8 +71,6 @@ def load_labels(root: str | Path, split: str = "train") -> pd.DataFrame:
         for col in ("is_digital", "type"):
             df[col] = df.get(col)
     return df
-#[id, image_path, label, path, is_digital, type] tables are used in 
-#train/val/test splits, and the path column is used to load images. 
 
 
 def unpack_batch(batch):
@@ -87,7 +85,7 @@ def unpack_batch(batch):
     return imgs, labels, None
 
 
-def face_meta_tensor(sample: "Sample", img_size: tuple[int, int]) -> torch.Tensor:
+def face_meta_tensor(sample: Sample, img_size: tuple[int, int]) -> torch.Tensor:
     """Face-box fractions + validity flag for the FaceRegionHead: [x1,y1,x2,y2,valid].
 
     ``img_size`` is the (W, H) of the image actually opened for this sample (the
@@ -202,31 +200,3 @@ def stratified_split(
         val_ids.update(rng.choice(ids, size=n_val, replace=False).tolist())
     all_ids = set(df["id"])
     return all_ids - val_ids, val_ids
-
-
-def lodo_split(root: str | Path, val_doc_type: str) -> tuple[set[str], set[str]]:
-
-    """Leave-One-Domain-Out: hold out one whole document ``type`` for validation.
-
-    Mirrors ``freuid-challenge``'s ``get_train_val_split``: all ids whose ``type`` equals
-    ``val_doc_type`` become validation, everything else is train. Train and val therefore
-    share NO document domain, so val AuDET measures cross-domain transfer (a more honest
-    proxy for the unseen-domain private test than the in-domain stratified split).
-
-    Returns ``(train_ids, val_ids)`` — the same shape as ``stratified_split`` so the
-    loaders are otherwise unchanged.
-    """
-    df = load_labels(root, "train")
-    types = set(df["type"].dropna())
-    if val_doc_type not in types:
-        raise ValueError(
-            f"val_doc_type {val_doc_type!r} not found; available: {sorted(types)}"
-        )
-    val_mask = df["type"] == val_doc_type
-    val_labels = set(df.loc[val_mask, "label"])
-    if val_labels != {0, 1}:
-        raise ValueError(
-            f"held-out domain {val_doc_type!r} has labels {val_labels}; need both 0 and 1 "
-            "(AuDET / ROC-AUC is undefined on a single-class validation set)"
-        )
-    return set(df.loc[~val_mask, "id"]), set(df.loc[val_mask, "id"])

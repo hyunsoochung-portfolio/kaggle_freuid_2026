@@ -1,0 +1,38 @@
+# configs/joint_consistency_v3.yaml
+# CLEAN A/B for the consistency branch: byte-for-byte the winning recipe
+# (data_attention_noanalog, public ep12 = 0.03935) with ONLY two keys added:
+# model_type=joint + consist_type=conv. Everything else -- LLRD 0.7, warmup 2, lr 5e-5,
+# analog off, AUC, TTA, 12 epochs, submit last -- is identical, so the ONLY difference vs
+# the 0.039 run is the parallel position-invariant conv-consistency branch.
+
+name: joint_consistency_v3
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 12
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  model_type: joint         # <-- added
+  consist_type: conv        # <-- added (position-invariant conv + global max-pool)
+  pool: map
+  head_dropout: 0.1
+  analog_double: false
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true

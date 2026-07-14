@@ -47,16 +47,8 @@ extra:
   # Augmentation: print-and-capture pipeline (no flip)
   augment: recapture
 
-  # Synthetic tamper: 30% of bona-fide per batch become synthetic positives
-  synth_tamper_prob: 0.3
-
   # Pairwise soft-AUC term (same weight as S1/S2)
   auc_loss_weight: 0.1
-
-  # Recapture probe: checkpoint on lowest probe AuDET
-  use_recapture_probe: true
-  recapture_probe_seed: 1234
-  checkpoint_metric: probe_audet
 
   # TTA at inference: three scales, rank-averaged, no flip.
   # Must all be multiples of patch_size=16 for DINOv3.  448=16x28, 512=16x32, 528=16x33.

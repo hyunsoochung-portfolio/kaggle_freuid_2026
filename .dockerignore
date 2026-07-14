@@ -1,0 +1,23 @@
+# Keep the build context small & the image clean. The ONLY large artifact we bake
+# in is docker/model/synth_tamper_v1_last.pt (re-included below).
+.git
+.venv
+__pycache__
+*.pyc
+.DS_Store
+.ruff_cache
+.pytest_cache
+
+# data & generated artifacts (organizers mount test data at run time)
+data
+submissions
+notebooks
+scratchpad
+docs/**/*_renders
+report
+
+# checkpoints: exclude everything, then re-include only the one we ship
+checkpoints
+*.pt
+*.pth
+!docker/model/synth_recapture_v1_ep11.pt
