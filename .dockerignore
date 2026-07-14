@@ -20,4 +20,4 @@ report
 checkpoints
 *.pt
 *.pth
-!docker/model/synth_tamper_v1_last.pt
+!docker/model/synth_recapture_v1_ep11.pt

@@ -1,21 +1,17 @@
 # configs/synth_tamper_v1.yaml
-# CANONICAL WINNING RECIPE -- team best, public LB AuDET 0.00625 (submitted as
-# "..._synth_tamper_v1_last"). = the 0.039 model recipe (dinov2 attn-pool + AUC +
-# TTA + LLRD + AMP) + ONE lever: data-grounded synthetic-fraud augmentation
-# (synth_tamper) that turns a fraction of bona-fide into fraud each epoch
-# (face-paste / colour-on-gray[BENIN] / field-carve -- all grounded in a
-# 100-image analysis of the real frauds).
+# The 0.039 winner (data_attention_noanalog) with ONE change: synthetic-fraud
+# augmentation on train + a synth PROBE for val/checkpoint selection.
 #
-# The 0.00625 came from running this to the FULL cosine anneal and submitting the
-# LAST epoch (ep25) -- NOT early-stopping. Our earlier 0.0157 was the SAME recipe
-# but stopped at ep12; the heavy synth augmentation suppresses the overfitting that
-# would otherwise punish 25 epochs, so full-anneal + submit-last is the win.
-# Changes vs the original synth_tamper_v1 (which early-stopped -> 0.0157):
-#   - early_stop_patience 3 -> 0  (never early-stop; run all 25 so LR fully anneals)
-#   - + save_every_epoch          (keep every checkpoint as insurance)
-#   - num_workers 8 -> 32         (speed; 96-core box, synth_tamper is CPU-heavy)
-# Submit {name}_last.pt (ep25). The synth PROBE val saturates and cannot rank
-# epochs -- judge on the public LB. seed 42 makes the run deterministic to reproduce.
+# The MODEL recipe matches the 0.039 config (backbone, image_size, lr, wd,
+# attn-pool, AUC loss, TTA, LLRD, AMP). Differences: epochs raised 12 -> 25 with
+# early stopping (the synth probe is a real compass now, so let it train until it
+# plateaus), and:
+#   - extra.synth_tamper: turn a fraction of bona-fide into synthetic fraud each
+#     epoch (face-swap / colour-on-gray[BENIN] / field-carve -- all data-grounded).
+#   - the val loader becomes a deterministic synth probe (clean bona 0 + tampered
+#     twin 1, 50/50) -> checkpoint on that non-saturating AuDET.
+#   - early_stop_patience: 3 (stop on 3 consecutive val_loss rises).
+# A/B question: does reproducing the observed digital tells beat the 0.039 baseline?
 
 name: synth_tamper_v1
 seed: 42
@@ -29,7 +25,7 @@ epochs: 25
 batch_size: 32
 lr: 5.0e-5
 weight_decay: 5.0e-2
-num_workers: 32
+num_workers: 8
 
 val_fraction: 0.1
 
@@ -40,9 +36,8 @@ extra:
   auc_loss_weight: 0.1
   tta: [476, 518, 560]
   missing_id_score: 0.5
-  save_last: true            # submit {name}_last.pt (ep25) -- the ranked 0.00625 model
-  save_every_epoch: true     # insurance: keep every epoch (probe saturates; pick via public if needed)
-  early_stop_patience: 0     # NEVER early-stop -- full 25ep, LR fully anneals (the 0.0157 -> 0.00625 lever)
+  save_last: true
+  early_stop_patience: 3
   llrd:
     enabled: true
     decay: 0.7
