@@ -253,3 +253,4 @@ report/
 
 # synthetic tamper sample images generated during dev/testing -- kept locally only
 synth_samples/
+report/technical_report.html
