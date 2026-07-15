@@ -41,6 +41,12 @@ data/
 kaggle competitions download -c the-freuid-challenge-2026-ijcai-ecai -p data && (cd data && unzip -q '*.zip')
 ```
 
+**External data / models:** none beyond the official FREUID training set and the
+**DINOv2 ViT-B/14** self-supervised pretrained weights (`vit_base_patch14_dinov2.lvd142m`,
+via `timm`, Apache-2.0), which are fine-tuned end-to-end into the shipped checkpoint. No
+external labelled/fraud data, no presentation-attack or forgery-localization networks. See
+the technical report §3 for details.
+
 ## 3. Train (reproduce the checkpoint)
 
 ```bash
