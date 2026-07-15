@@ -1,0 +1,41 @@
+# configs/yuri_analog_double_v2.yaml
+# Re-test analog_double, but with the CALIBRATED recapture_v2 degradation instead of
+# the naive one. The naive version was proven harmful (dinov2_analog 0.115 vs
+# dinov2_v1 0.0686), but that used uncalibrated augmentation params. recapture_v2
+# is fit to the actual 20 real is_digital=False training samples' stats
+# (scripts/recapture_calib.py: sharpness ~0.16x, illumination unevenness ~1.33x via
+# smooth gradient+vignette, saturation ~0.90x, brightness ~0.93x, contrast ~0.93x).
+# Question: does matching the real analog distribution (rather than guessing at
+# degradation params) make analog_double actually help this time?
+# Everything else matches data_attention_noanalog (attn-pool, AUC loss, TTA, LLRD).
+
+name: yuri_analog_double_v2
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 12
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: true
+  recapture_version: v2   # calibrated, not the naive version that failed before
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true

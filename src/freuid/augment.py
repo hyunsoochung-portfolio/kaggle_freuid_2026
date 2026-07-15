@@ -376,10 +376,74 @@ def _field_carve(img, rng, nrng, box=None):
     return out, (x, y, x + w, y + h)
 
 
-def synth_tamper(img, donor, rng, nrng, text_prob=0.2, allow_color_on_gray=False):
+def _boxes_overlap(a, b):
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    return not (ax1 <= bx0 or bx1 <= ax0 or ay1 <= by0 or by1 <= ay0)
+
+
+def _sample_patch_box(W, H, w, h, rng, avoid=None, tries=24):
+    """A random (x0, y0, x1, y1) box of size (w, h) inside the image; retries to
+    avoid overlapping `avoid` (e.g. the photo box) when possible."""
+    box = (0, 0, min(W, w), min(H, h))
+    for _ in range(tries):
+        x0 = rng.randint(0, max(0, W - w))
+        y0 = rng.randint(0, max(0, H - h))
+        box = (x0, y0, x0 + w, y0 + h)
+        if avoid is None or not _boxes_overlap(box, avoid):
+            return box
+    return box
+
+
+def _copy_move(img, rng, nrng, box=None):
+    """Copy-move forgery: duplicate a patch from ELSEWHERE IN THE SAME IMAGE over a
+    target field -- the classic real-world tell of blotting out an edited/erased
+    value with a locally-sourced patch, as opposed to field_carve's fabricated
+    scratched-field look (no donor image involved, unlike the face tells)."""
+    H, W = img.shape[:2]
+    target = box if box is not None else _find_text_region(img)
+    if target is None:
+        return None
+    tx, ty, tw, th = target
+    target_box = (tx, ty, tx + tw, ty + th)
+    if tw < 8 or th < 6:
+        return None
+    sx0, sy0, sx1, sy1 = _sample_patch_box(W, H, tw, th, rng, avoid=target_box)
+    patch = img[sy0:sy1, sx0:sx1].copy()
+    if patch.shape[0] != th or patch.shape[1] != tw:
+        patch = cv2.resize(patch, (tw, th))
+    # real copy-move forgeries rarely paste a byte-perfect patch -- a slight
+    # flip/rotate/scale is common and leaves a subtler (but still real) seam.
+    if rng.random() < 0.5:
+        patch = cv2.flip(patch, 1)
+    Mrot = cv2.getRotationMatrix2D((tw / 2, th / 2), rng.uniform(-4, 4), rng.uniform(0.96, 1.04))
+    patch = cv2.warpAffine(patch, Mrot, (tw, th), borderMode=cv2.BORDER_REFLECT)
+    patch = patch.astype(np.float32)
+    patch += nrng.standard_normal(patch.shape).astype(np.float32) * rng.uniform(2, 5)
+    patch = np.clip(patch, 0, 255).astype(np.uint8)
+    out = img.copy()
+    out[ty:ty + th, tx:tx + tw] = patch
+    edge = int(rng.uniform(150, 190))
+    cv2.rectangle(out, (tx, ty), (tx + tw - 1, ty + th - 1), (edge, edge, edge), 1)
+    return out, (tx, ty, tx + tw, ty + th)
+
+
+def synth_tamper(img, donor, rng, nrng, text_prob=0.2, copy_move_prob=0.0,
+                 allow_color_on_gray=False):
     """Bona-fide (BGR) -> synthetic fraud (BGR). Returns (out_bgr, mode); mode is
-    'none' if nothing could be applied (caller keeps the original label 0)."""
-    if rng.random() < text_prob:
+    'none' if nothing could be applied (caller keeps the original label 0).
+
+    Dispatch: text_prob chance of field_carve (fabricated scratched-field look),
+    then copy_move_prob chance of copy_move (same-image duplicated patch), else a
+    face-based tell (face_clean_paste, or face_color_on_gray on BENIN/DL)."""
+    roll = rng.random()
+    if roll < text_prob:
+        res = _field_carve(img, rng, nrng)
+        return (res[0], "field_carve") if res else (img, "none")
+    if roll < text_prob + copy_move_prob:
+        res = _copy_move(img, rng, nrng)
+        if res:
+            return res[0], "copy_move"
         res = _field_carve(img, rng, nrng)
         return (res[0], "field_carve") if res else (img, "none")
     if allow_color_on_gray and rng.random() < 0.25:
@@ -438,12 +502,13 @@ class SynthTamperWrapper(Dataset, _DonorMixin):
     pass through unchanged. Tamper is fresh-random each epoch (train variety)."""
 
     def __init__(self, base, transform, donor_pool, prob=0.3, text_prob=0.2,
-                 recapture_prob=0.0, seed=0):
+                 copy_move_prob=0.0, recapture_prob=0.0, seed=0):
         self.base = base
         self.tf = transform
         self.donor_pool = donor_pool
         self.prob = float(prob)
         self.text_prob = float(text_prob)
+        self.copy_move_prob = float(copy_move_prob)
         self.recapture_prob = float(recapture_prob)
         self.seed = int(seed)
         self._donor_cache = {}
@@ -464,6 +529,7 @@ class SynthTamperWrapper(Dataset, _DonorMixin):
                 bgr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
                 out, mode = synth_tamper(
                     bgr, donor, rng, np.random.default_rng(), self.text_prob,
+                    copy_move_prob=self.copy_move_prob,
                     allow_color_on_gray=(s.type == "BENIN/DL"))
                 if mode != "none":
                     img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
@@ -491,11 +557,13 @@ class SynthProbeDataset(Dataset, _DonorMixin):
     so the probe is byte-identical every epoch: a stable checkpoint compass that,
     unlike the in-domain clean val, does not saturate."""
 
-    def __init__(self, base_bona, transform, donor_pool, text_prob=0.2, seed=0):
+    def __init__(self, base_bona, transform, donor_pool, text_prob=0.2,
+                 copy_move_prob=0.0, seed=0):
         self.base = base_bona                          # transform=None, val bona-fide only
         self.tf = transform
         self.donor_pool = donor_pool
         self.text_prob = float(text_prob)
+        self.copy_move_prob = float(copy_move_prob)
         self.seed = int(seed)
         self.n = len(base_bona.samples)
         self._donor_cache = {}
@@ -518,6 +586,7 @@ class SynthProbeDataset(Dataset, _DonorMixin):
             return self.tf(img), 0
         bgr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
         out, mode = synth_tamper(bgr, donor, rng, nrng, self.text_prob,
+                                 copy_move_prob=self.copy_move_prob,
                                  allow_color_on_gray=(s.type == "BENIN/DL"))
         if mode == "none":
             return self.tf(img), 0

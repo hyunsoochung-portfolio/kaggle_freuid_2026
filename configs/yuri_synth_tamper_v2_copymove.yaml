@@ -1,0 +1,43 @@
+# configs/yuri_synth_tamper_v2_copymove.yaml
+# yuri_synth_tamper_v1(0.00625, our best)에 copy_move 위조 유형만 추가.
+# copy_move: 같은 이미지 안에서 다른 영역을 복사-붙여넣기해서 필드를 가리는 방식
+# (donor 이미지 불필요, field_carve의 "조작된 텍스처"와는 다른 결의 실제 위조 기법).
+# text_prob=0.2(field_carve) + copy_move_prob=0.15 + 나머지 0.65(얼굴 기반 tell).
+# 나머지는 synth_tamper_v1과 완전히 동일 (attn-pool, AUC loss, TTA, LLRD, 25ep, patience7).
+
+name: yuri_synth_tamper_v2_copymove
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 25
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: false
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true
+  early_stop_patience: 7
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true
+  synth_tamper:
+    enabled: true
+    prob: 0.3
+    text_prob: 0.2
+    copy_move_prob: 0.15
+    donor_per_type: 48

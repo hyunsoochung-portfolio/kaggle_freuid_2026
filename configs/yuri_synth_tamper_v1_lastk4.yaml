@@ -1,0 +1,40 @@
+# yuri_synth_tamper_v1(0.00625)에서 딱 하나만 바꿈: train_last_k_blocks=4
+# (마지막 4개 transformer block + head만 학습, 나머지 얼림 -- 조형원님 팁: 부분 파인튜닝이
+# 풀 파인튜닝보다 나을 수 있다는 관찰 검증)
+
+name: yuri_synth_tamper_v1_lastk4
+seed: 42
+data_dir: data
+
+backbone: vit_base_patch14_dinov2.lvd142m
+pretrained: true
+image_size: 518
+
+epochs: 25
+batch_size: 32
+lr: 5.0e-5
+weight_decay: 5.0e-2
+num_workers: 8
+
+val_fraction: 0.1
+
+extra:
+  pool: map
+  head_dropout: 0.1
+  analog_double: false
+  train_last_k_blocks: 4
+  auc_loss_weight: 0.1
+  tta: [476, 518, 560]
+  missing_id_score: 0.5
+  save_last: true
+  early_stop_patience: 7
+  llrd:
+    enabled: true
+    decay: 0.7
+    warmup_epochs: 2
+  amp: true
+  synth_tamper:
+    enabled: true
+    prob: 0.3
+    text_prob: 0.2
+    donor_per_type: 48

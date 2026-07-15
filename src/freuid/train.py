@@ -221,6 +221,7 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader, 
         train_ds = SynthTamperWrapper(
             base_train, train_tf, donor_pool,
             prob=float(st.get("prob", 0.3)), text_prob=float(st.get("text_prob", 0.2)),
+            copy_move_prob=float(st.get("copy_move_prob", 0.0)),
             recapture_prob=float(st.get("recapture_prob", 0.0)), seed=cfg.seed,
         )
         if st.get("val_probe", "synth") == "recapture":
@@ -233,24 +234,31 @@ def build_loaders(cfg: Config, data_cfg: dict) -> tuple[DataLoader, DataLoader, 
             base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
             base_val.samples = [s for s in base_val.samples if s.label == 0]   # bona only
             val_ds = SynthProbeDataset(base_val, clean_tf, donor_pool,
-                                       text_prob=float(st.get("text_prob", 0.2)), seed=cfg.seed)
+                                       text_prob=float(st.get("text_prob", 0.2)),
+                                       copy_move_prob=float(st.get("copy_move_prob", 0.0)),
+                                       seed=cfg.seed)
             probe_desc = f"synth probe {len(val_ds)} ({len(base_val.samples)} bona x2, 50/50)"
         print(
             f"[train] synth_tamper prob={st.get('prob', 0.3)} "
             f"recapture_prob={st.get('recapture_prob', 0.0)}: train={len(train_ds)} | {probe_desc}"
         )
     elif cfg.extra.get("analog_double", False):
-        # NOTE: default False (not True) -- analog-double alone was found harmful
-        # (dinov2_analog 0.115 vs dinov2_v1 0.0686). Opt in explicitly if retesting.
-        from freuid.augment import AnalogDoubleDataset, recapture_transforms
-        make_analog = functools.partial(recapture_transforms, size, mean, std)
+        # NOTE: default False (not True) -- the NAIVE (uncalibrated) version was found
+        # harmful (dinov2_analog 0.115 vs dinov2_v1 0.0686). extra.recapture_version:
+        # "v2" swaps in the calibrated degradation (matched to the 20 real
+        # is_digital=False samples' stats via scripts/recapture_calib.py) instead.
+        from freuid.augment import AnalogDoubleDataset, recapture_transforms, recapture_v2_transforms
+        rc_version = cfg.extra.get("recapture_version", "v1")
+        rc_fn = recapture_v2_transforms if rc_version == "v2" else recapture_transforms
+        make_analog = functools.partial(rc_fn, size, mean, std)
         base_train = FreuidDataset(cfg.data_dir, "train", None, ids=train_ids)
         base_val = FreuidDataset(cfg.data_dir, "train", None, ids=val_ids)
         train_ds = AnalogDoubleDataset(base_train, clean_tf, make_analog)
         val_ds = AnalogDoubleDataset(base_val, clean_tf, make_analog, deterministic_seed=cfg.seed)
         print(
-            f"[train] analog_double: train {len(base_train.samples)}+{len(train_ds.analog_idx)}"
-            f"={len(train_ds)} | val {len(base_val.samples)}+{len(val_ds.analog_idx)}={len(val_ds)}"
+            f"[train] analog_double (recapture_version={rc_version}): train "
+            f"{len(base_train.samples)}+{len(train_ds.analog_idx)}={len(train_ds)} | val "
+            f"{len(base_val.samples)}+{len(val_ds.analog_idx)}={len(val_ds)}"
         )
     else:
         train_tf = build_transforms(size, True, mean, std, augment=cfg.extra.get("augment"))
